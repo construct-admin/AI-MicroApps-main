@@ -174,7 +174,7 @@ PHASES = {
             },
             "instruct":{
             "type":"markdown",
-            "body":"Select additional focus areas for your learning objectives.",
+            "body":"<strong>Select additional focus areas for your learning objectives.</strong>",
             "unsafe_allow_html": True
             },
             "real_world_relevance": {
