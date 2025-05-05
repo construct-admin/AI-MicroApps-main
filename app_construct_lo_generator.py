@@ -196,8 +196,13 @@ PHASES = {
             # Bloom's Taxonomy
             "bloom_taxonomy": {
                 "type": "markdown",
-                "body": """<h3>Bloom's Taxonomy</h3>Select cognitive goals to focus on:""",
+                "body": """<h3>Bloom's Taxonomy</h3>""",
                 "unsafe_allow_html": True
+            },
+            "instruct2":{
+            "type":"markdown",
+            "body":"Select cognitive goals to focus on:",
+            "unsafe_allow_html": True
             },
             "goal_rem": {
                 "type": "checkbox",
