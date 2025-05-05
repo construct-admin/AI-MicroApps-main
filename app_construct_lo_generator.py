@@ -201,7 +201,7 @@ PHASES = {
             },
             "instruct2":{
             "type":"markdown",
-            "body":"Select cognitive goals to focus on:",
+            "body":"<strong>Select cognitive goals to focus on:</strong>",
             "unsafe_allow_html": True
             },
             "goal_rem": {
