@@ -169,8 +169,13 @@ PHASES = {
             # Relevance Preferences
             "relevance_preferences": {
                 "type": "markdown",
-                "body": """<h3>Preferences:</h3><br/> Select additional focus areas for your learning objectives.""",
+                "body": """<h3>Preferences:</h3>""",
                 "unsafe_allow_html": True
+            },
+            "instruct":{
+            "type":"markdown",
+            "body":"Select additional focus areas for your learning objectives.",
+            "unsafe_allow_html": True
             },
             "real_world_relevance": {
                 "type": "checkbox",
@@ -191,7 +196,7 @@ PHASES = {
             # Bloom's Taxonomy
             "bloom_taxonomy": {
                 "type": "markdown",
-                "body": """<h3>Bloom's Taxonomy</h3><br/> Select cognitive goals to focus on:""",
+                "body": """<h3>Bloom's Taxonomy</h3>Select cognitive goals to focus on:""",
                 "unsafe_allow_html": True
             },
             "goal_rem": {
