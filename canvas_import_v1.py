@@ -166,6 +166,11 @@ def add_to_module(course_id, module_id, item_type, item_ref, token, domain):
         response = requests.post(url, headers=headers, json=payload)
         if response.status_code in (200, 201):
             return response
+        elif response.status_code == 422:
+            st.error(f"⚠️ Invalid module item payload: {response.json()}")
+            break
+        elif response.status_code == 404:
+            st.error("❌ Content not found when trying to add to module. Make sure the page/assignment/quiz was created correctly.")
         time.sleep(2 + attempt)
     return response
 
