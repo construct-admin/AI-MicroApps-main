@@ -56,14 +56,14 @@ def generate_html_via_ai(page_title, module_title, content):
 
 def convert_tags_to_html(text):
     text = re.sub(
-        r"<accordion>\\s*Title: \\s*(.*?)\\s*Content: \\s*(.*?)</accordion>",
+        r"<accordion>\s*Title: \s*(.*?)\s*Content: \s*(.*?)</accordion>",
         r'''<div style="background-color:#007BFF; color:white; padding:12px; border-radius:8px; margin-bottom:10px;">
 <details><summary style="font-weight:bold; cursor:pointer;">\1</summary><div style="margin-top:10px;">\2</div></details>
 </div>''',
         text, flags=re.DOTALL
     )
     text = re.sub(
-        r"<callout>\\s*(.*?)</callout>",
+        r"<callout>\s*(.*?)</callout>",
         r'''<div style="background-color:#fef3c7; border-left:6px solid #f59e0b; padding:12px 20px; margin:20px 0; border-radius:6px;"><strong>\1</strong></div>''',
         text, flags=re.DOTALL
     )
@@ -94,6 +94,7 @@ def get_or_create_module(course_id, module_name, token, domain, module_cache):
         if m["name"].lower() == module_name.lower():
             module_cache[module_name] = m["id"]
             return m["id"]
+    time.sleep(1)
     resp = requests.post(url, headers=headers, json={"name": module_name})
     if resp.status_code in (200,201):
         mid = resp.json().get("id")
@@ -105,39 +106,69 @@ def post_to_canvas(course_id, title, html_body, token, domain, page_type):
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     base = f"https://{domain}/api/v1/courses/{course_id}"
     item_ref = None
+    r = None
+
     if page_type == "Pages":
         url = f"{base}/pages"
         payload = {"wiki_page": {"title": title, "body": html_body, "published": True}}
         r = requests.post(url, headers=headers, json=payload)
         if r.status_code in (200, 201):
-            item_data = r.json()
-            item_ref = item_data.get("url") or title.lower().replace(" ", "-")
-    else:
-        if page_type == "Assignments":
-            url = f"{base}/assignments"
-            payload = {"assignment": {"name": title, "description": html_body,
-                                        "submission_types": ["online_text_entry"], "published": True}}
-        elif page_type == "Quizzes":
-            url = f"{base}/quizzes"
-            payload = {"quiz": {"title": title, "description": html_body,
-                                  "quiz_type": "assignment", "published": True}}
-        else:
-            url = f"{base}/discussion_topics"
-            payload = {"title": title, "message": html_body, "published": True}
+            item_ref = r.json().get("url")
+    elif page_type == "Assignments":
+        url = f"{base}/assignments"
+        payload = {
+            "assignment": {
+                "name": title,
+                "description": html_body,
+                "submission_types": ["online_text_entry"],
+                "published": True
+            }
+        }
         r = requests.post(url, headers=headers, json=payload)
         if r.status_code in (200, 201):
             item_ref = r.json().get("id")
+    elif page_type == "Quizzes":
+        url = f"{base}/quizzes"
+        payload = {
+            "quiz": {
+                "title": title,
+                "description": html_body,
+                "quiz_type": "assignment",
+                "published": True
+            }
+        }
+        r = requests.post(url, headers=headers, json=payload)
+        if r.status_code in (200, 201):
+            item_ref = r.json().get("id")
+    else:
+        url = f"{base}/discussion_topics"
+        payload = {
+            "title": title,
+            "message": html_body,
+            "published": True
+        }
+        r = requests.post(url, headers=headers, json=payload)
+        if r.status_code in (200, 201):
+            item_ref = r.json().get("id")
+
     return r.status_code, item_ref
 
 def add_to_module(course_id, module_id, item_type, item_ref, token, domain):
     url = f"https://{domain}/api/v1/courses/{course_id}/modules/{module_id}/items"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {"module_item": {"type": item_type, "published": True}}
+
     if item_type == "Page":
         payload["module_item"]["page_url"] = item_ref
     else:
         payload["module_item"]["content_id"] = item_ref
-    return requests.post(url, headers=headers, json=payload)
+
+    for attempt in range(3):
+        response = requests.post(url, headers=headers, json=payload)
+        if response.status_code in (200, 201):
+            return response
+        time.sleep(2 + attempt)
+    return response
 
 # --- Streamlit App ---
 st.set_page_config(page_title="Canvas Storyboard Importer", layout="centered")
@@ -171,7 +202,7 @@ if uploaded and course_id and domain and token:
                     if not ref:
                         st.error("No item reference returned from Canvas.")
                         continue
-                    time.sleep(1.5)
+                    time.sleep(2)
                     itype = "Page" if ptype=="Pages" else ptype[:-1].capitalize()
                     modr = add_to_module(course_id, mid, itype, ref, token, domain)
                     if modr.status_code in (200,201):
