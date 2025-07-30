@@ -1,23 +1,30 @@
+#!/usr/bin/env python3
+import os
 import re
 import requests
 import streamlit as st
-from docx import Document
 import time
+from docx import Document
 
 try:
     import openai
 except ImportError:
     openai = None
 
+PUBLISHED = True
 SYSTEM_PROMPT = "Convert the content into Canvas LMS-compatible HTML. Use only inline styles. Avoid using <style>, classes, or JavaScript. Format accordions, callouts, banners using <details>, <div>, <hr>, etc. Avoid advanced CSS."
 
-# --- Helpers ---
-
+# ---------------------------
+# File Text Extraction
+# ---------------------------
 def extract_canvas_pages(docx_file):
     doc = Document(docx_file)
     full_text = '\n'.join([para.text for para in doc.paragraphs])
     return re.findall(r"<canvas_page>(.*?)</canvas_page>", full_text, re.DOTALL)
 
+# ---------------------------
+# Page Metadata Extraction
+# ---------------------------
 def parse_page_block(block_text):
     def extract_tag(tag, default=""):
         match = re.search(fr"<{tag}>(.*?)</{tag}>", block_text)
@@ -26,10 +33,12 @@ def parse_page_block(block_text):
     page_type = extract_tag("page_type", "Pages").capitalize()
     page_name = extract_tag("page_name", "Untitled Page")
     module_name = extract_tag("module_name", "General")
-
     clean_text = re.sub(r"<(page_type|page_name|module_name)>.*?</\\1>", "", block_text, flags=re.DOTALL).strip()
     return page_type, page_name, module_name, clean_text
 
+# ---------------------------
+# HTML Conversion via AI
+# ---------------------------
 def generate_html_via_ai(page_title, module_title, content):
     openai_api_key = st.secrets.get("OPENAI_API_KEY")
     if not openai_api_key:
@@ -54,34 +63,30 @@ def generate_html_via_ai(page_title, module_title, content):
         return response.json()["choices"][0]["message"]["content"].strip("`")
     return None
 
+# ---------------------------
+# Fallback Inline Tag Conversion
+# ---------------------------
 def convert_tags_to_html(text):
-    text = re.sub(
-        r"<accordion>\s*Title: \s*(.*?)\s*Content: \s*(.*?)</accordion>",
+    text = re.sub(r"<accordion>\s*Title: \s*(.*?)\s*Content: \s*(.*?)</accordion>",
         r'''<div style="background-color:#007BFF; color:white; padding:12px; border-radius:8px; margin-bottom:10px;">
 <details><summary style="font-weight:bold; cursor:pointer;">\1</summary><div style="margin-top:10px;">\2</div></details>
-</div>''',
-        text, flags=re.DOTALL
-    )
-    text = re.sub(
-        r"<callout>\s*(.*?)</callout>",
-        r'''<div style="background-color:#fef3c7; border-left:6px solid #f59e0b; padding:12px 20px; margin:20px 0; border-radius:6px;"><strong>\1</strong></div>''',
-        text, flags=re.DOTALL
-    )
+</div>''', text, flags=re.DOTALL)
+    text = re.sub(r"<callout>\s*(.*?)</callout>",
+        r'''<div style="background-color:#fef3c7; border-left:6px solid #f59e0b; padding:12px 20px; margin:20px 0; border-radius:6px;"><strong>\1</strong></div>''', text, flags=re.DOTALL)
     text = text.replace("<thick_line />", '<hr style="border:5px solid #333;" />')
     text = text.replace("<line />", '<hr style="border:1px solid #ccc;" />')
     text = re.sub(r"<h2>(.*?)</h2>", r"<h2>\1</h2>", text)
     text = re.sub(r"<h3>(.*?)</h3>", r"<h3>\1</h3>", text)
     text = re.sub(r"<paragraph>(.*?)</paragraph>", r"<p>\1</p>", text, flags=re.DOTALL)
     text = re.sub(r"<text>(.*?)</text>", r"<p>\1</p>", text, flags=re.DOTALL)
-    text = re.sub(
-        r"<bullets>(.*?)</bullets>",
-        lambda m: "<ul>" + "".join(
-            f"<li>{line.strip()}</li>" for line in m.group(1).split("\n") if line.strip().startswith("-")
-        ) + "</ul>",
-        text, flags=re.DOTALL
-    )
+    text = re.sub(r"<bullets>(.*?)</bullets>",
+        lambda m: "<ul>" + "".join(f"<li>{line.strip()}</li>" for line in m.group(1).split("\n") if line.strip().startswith("-")) + "</ul>",
+        text, flags=re.DOTALL)
     return text
 
+# ---------------------------
+# Canvas API Handlers
+# ---------------------------
 def get_or_create_module(course_id, module_name, token, domain, module_cache):
     if module_name in module_cache:
         return module_cache[module_name]
@@ -115,37 +120,19 @@ def post_to_canvas(course_id, title, html_body, token, domain, page_type):
             item_ref = r.json().get("url")
     elif page_type == "Assignments":
         url = f"{base}/assignments"
-        payload = {
-            "assignment": {
-                "name": title,
-                "description": html_body,
-                "submission_types": ["online_text_entry"],
-                "published": True
-            }
-        }
+        payload = {"assignment": {"name": title, "description": html_body, "submission_types": ["online_text_entry"], "published": True}}
         r = requests.post(url, headers=headers, json=payload)
         if r.status_code in (200, 201):
             item_ref = r.json().get("id")
     elif page_type == "Quizzes":
         url = f"{base}/quizzes"
-        payload = {
-            "quiz": {
-                "title": title,
-                "description": html_body,
-                "quiz_type": "assignment",
-                "published": True
-            }
-        }
+        payload = {"quiz": {"title": title, "description": html_body, "quiz_type": "assignment", "published": True}}
         r = requests.post(url, headers=headers, json=payload)
         if r.status_code in (200, 201):
             item_ref = r.json().get("id")
     else:
         url = f"{base}/discussion_topics"
-        payload = {
-            "title": title,
-            "message": html_body,
-            "published": True
-        }
+        payload = {"title": title, "message": html_body, "published": True}
         r = requests.post(url, headers=headers, json=payload)
         if r.status_code in (200, 201):
             item_ref = r.json().get("id")
@@ -174,7 +161,9 @@ def add_to_module(course_id, module_id, item_type, item_ref, token, domain):
         time.sleep(2 + attempt)
     return response
 
-# --- Streamlit App ---
+# ---------------------------
+# Streamlit App
+# ---------------------------
 st.set_page_config(page_title="Canvas Storyboard Importer", layout="centered")
 st.title("🧩 Canvas Storyboard Importer with AI HTML Support")
 
