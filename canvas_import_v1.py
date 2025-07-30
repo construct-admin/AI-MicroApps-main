@@ -88,15 +88,14 @@ def get_or_create_module(course_id, module_name, token, domain, module_cache):
     url = f"https://{domain}/api/v1/courses/{course_id}/modules"
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(url, headers=headers)
-    if resp.status_code != 200:
-        return None
-    for m in resp.json():
-        if m["name"].lower() == module_name.lower():
-            module_cache[module_name] = m["id"]
-            return m["id"]
+    if resp.status_code == 200:
+        for m in resp.json():
+            if m["name"].strip().lower() == module_name.strip().lower():
+                module_cache[module_name] = m["id"]
+                return m["id"]
     time.sleep(1)
-    resp = requests.post(url, headers=headers, json={"name": module_name})
-    if resp.status_code in (200,201):
+    resp = requests.post(url, headers=headers, json={"name": module_name, "published": True})
+    if resp.status_code in (200, 201):
         mid = resp.json().get("id")
         module_cache[module_name] = mid
         return mid
