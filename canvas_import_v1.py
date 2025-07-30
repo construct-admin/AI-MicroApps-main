@@ -2,6 +2,7 @@ import re
 import requests
 import streamlit as st
 from docx import Document
+import time
 
 try:
     import openai
@@ -26,7 +27,6 @@ def parse_page_block(block_text):
     page_name = extract_tag("page_name", "Untitled Page")
     module_name = extract_tag("module_name", "General")
 
-    # Remove structural tags
     clean_text = re.sub(r"<(page_type|page_name|module_name)>.*?</\\1>", "", block_text, flags=re.DOTALL).strip()
     return page_type, page_name, module_name, clean_text
 
@@ -56,7 +56,7 @@ def generate_html_via_ai(page_title, module_title, content):
 
 def convert_tags_to_html(text):
     text = re.sub(
-        r"<accordion>\\s*Title:\\s*(.*?)\\s*Content:\\s*(.*?)</accordion>",
+        r"<accordion>\\s*Title: \\s*(.*?)\\s*Content: \\s*(.*?)</accordion>",
         r'''<div style="background-color:#007BFF; color:white; padding:12px; border-radius:8px; margin-bottom:10px;">
 <details><summary style="font-weight:bold; cursor:pointer;">\1</summary><div style="margin-top:10px;">\2</div></details>
 </div>''',
@@ -94,7 +94,6 @@ def get_or_create_module(course_id, module_name, token, domain, module_cache):
         if m["name"].lower() == module_name.lower():
             module_cache[module_name] = m["id"]
             return m["id"]
-    # create if not exists
     resp = requests.post(url, headers=headers, json={"name": module_name})
     if resp.status_code in (200,201):
         mid = resp.json().get("id")
@@ -119,7 +118,7 @@ def post_to_canvas(course_id, title, html_body, token, domain, page_type):
             url = f"{base}/quizzes"
             payload = {"quiz": {"title": title, "description": html_body,
                                 "quiz_type": "assignment", "published": True}}
-        else:  # Discussions
+        else:
             url = f"{base}/discussion_topics"
             payload = {"title": title, "message": html_body, "published": True}
         r = requests.post(url, headers=headers, json=payload)
@@ -165,6 +164,10 @@ if uploaded and course_id and domain and token:
                     continue
                 status, ref = post_to_canvas(course_id, pname, html, token, domain, ptype)
                 if status in (200,201):
+                    if not ref:
+                        st.error("No item reference returned from Canvas.")
+                        continue
+                    time.sleep(1.5)
                     itype = "Page" if ptype=="Pages" else ptype[:-1].capitalize()
                     modr = add_to_module(course_id, mid, itype, ref, token, domain)
                     if modr.status_code in (200,201):
