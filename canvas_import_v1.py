@@ -104,25 +104,29 @@ def get_or_create_module(course_id, module_name, token, domain, module_cache):
 def post_to_canvas(course_id, title, html_body, token, domain, page_type):
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     base = f"https://{domain}/api/v1/courses/{course_id}"
+    item_ref = None
     if page_type == "Pages":
         url = f"{base}/pages"
         payload = {"wiki_page": {"title": title, "body": html_body, "published": True}}
         r = requests.post(url, headers=headers, json=payload)
-        item_ref = r.json().get("url")
+        if r.status_code in (200, 201):
+            item_data = r.json()
+            item_ref = item_data.get("url") or title.lower().replace(" ", "-")
     else:
         if page_type == "Assignments":
             url = f"{base}/assignments"
             payload = {"assignment": {"name": title, "description": html_body,
-                                      "submission_types": ["online_text_entry"], "published": True}}
+                                        "submission_types": ["online_text_entry"], "published": True}}
         elif page_type == "Quizzes":
             url = f"{base}/quizzes"
             payload = {"quiz": {"title": title, "description": html_body,
-                                "quiz_type": "assignment", "published": True}}
+                                  "quiz_type": "assignment", "published": True}}
         else:
             url = f"{base}/discussion_topics"
             payload = {"title": title, "message": html_body, "published": True}
         r = requests.post(url, headers=headers, json=payload)
-        item_ref = r.json().get("id")
+        if r.status_code in (200, 201):
+            item_ref = r.json().get("id")
     return r.status_code, item_ref
 
 def add_to_module(course_id, module_id, item_type, item_ref, token, domain):
