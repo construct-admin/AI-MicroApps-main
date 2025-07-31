@@ -44,20 +44,23 @@ def convert_bullets(text):
 # --- OpenAI HTML Conversion ---
 def convert_to_html_with_openai(docx_text, fallback_html):
     try:
-        client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-        prompt = f"""Convert the following storyboard content to HTML. Preserve formatting like headings, bold, lists, and replace tagged blocks like <accordion>, <callout>, <question> etc. using inline CSS-friendly HTML.
+        from openai import OpenAI
+        client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-Use:
-- <details><summary style="cursor: pointer; font-weight: bold; background-color:#0077b6; color:white; padding:10px; border-radius:5px;">{title} <small>(click to reveal)</small></summary><div style="padding:10px 20px; margin-top: 10px; background-color:#f2f2f2; color:#333;">{body}</div></details> for accordions.
-- <blockquote><p>...</p></blockquote> for callouts.
-- Use <ul><li> for bullets starting with '-'.
-- Quiz questions with <question><multiple choice> tags should remain structurally tagged for programmatic parsing.
-- Preserve formatting (e.g., headings, bold, italics) and structure from the source.
+        prompt = f"""Convert the following storyboard content to HTML. Preserve formatting like headings (<h1>, <h2>), bold (<strong>), italics (<em>), and lists. 
+Replace the following tags with valid HTML (using inline CSS):
+- <accordion> → <details><summary style="cursor: pointer; font-weight: bold; background-color:#0077b6; color:white; padding:10px; border-radius:5px;">Title <small>(click to reveal)</small></summary><div style="padding:10px 20px; margin-top: 10px; background-color:#f2f2f2; color:#333;">Content</div></details>
+- <callout> → <blockquote><p>...</p></blockquote>
+- Bullet points starting with '-' → <ul><li>...</li></ul>
+- <question><multiple choice> → Leave these blocks in-place for structured Canvas parsing
+
+Keep paragraphs and indentation intact.
 
 Storyboard Content:
 {docx_text}
 
-Only output valid HTML."""
+Output only valid HTML. No explanation or preamble."""
+        
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": prompt}],
@@ -67,9 +70,6 @@ Only output valid HTML."""
     except Exception as e:
         st.warning(f"⚠️ OpenAI processing failed, using fallback: {e}")
         return fallback_html
-
-
-
 
 # --- Canvas API Integration ---
 def get_or_create_module(module_name, domain, course_id, token, module_cache):
