@@ -15,11 +15,10 @@ uploaded_file = st.file_uploader("Upload storyboard (.docx)", type="docx")
 
 # --- Custom Component Templates ---
 TEMPLATES = {
-    "accordion": '<details style="margin: 10px 0; border: 1px solid #ccc; border-radius: 5px; padding: 10px;"><summary style="font-weight: bold; cursor: pointer;">{title}</summary><div style="margin-top:10px">{body}</div></details>',
-    "callout": '<div style="border-left:5px solid #2196F3;background:#f1f9ff;padding:10px 15px;margin:10px 0;">{body}</div>',
-    "bullets": lambda items: '<ul>' + ''.join([f'<li>{item.strip()}</li>' for item in items.split("\n") if item.strip()]) + '</ul>'
+    "accordion": lambda title, body: f'<details><summary style="cursor: pointer;">{title}<small> (click to reveal) </small></summary><p style="padding-left: 40px;">{body}</p></details>',
+    "callout": lambda body: f'<blockquote><p>{body}</p></blockquote>',
+    "bullets": lambda items: '<ul>' + ''.join([f'<li>{item.strip().lstrip("-•").strip()}</li>' for item in items.split("\n") if item.strip()]) + '</ul>'
 }
-
 
 # --- Canvas API Integration ---
 def get_or_create_module(module_name, domain, course_id, token, module_cache):
@@ -63,68 +62,58 @@ def add_to_module(domain, course_id, module_id, page_url, title, token):
     response = requests.post(url, headers=headers, json=payload)
     return response.status_code in (200, 201)
 
-# --- AI HTML Conversion (or Fallback to Regex Template Injection) ---
-def process_html_content(raw_text):
-    content = raw_text
+# --- Replace Storyboard Tags with HTML ---
+def convert_storyboard_to_html(text):
+    pages = re.split(r"<page name=['\"](.*?)['\"] type=['\"](.*?)['\"] module=['\"](.*?)['\"]>", text)
+    output = []
+    for i in range(1, len(pages), 4):
+        title, type_, module, content = pages[i], pages[i+1], pages[i+2], pages[i+3]
 
-    # Replace <accordion title=...>...</accordion>
-    content = re.sub(r"<accordion title=\"(.*?)\">(.*?)</accordion>",
-                     lambda m: TEMPLATES["accordion"].format(title=m.group(1), body=m.group(2)),
-                     content, flags=re.DOTALL)
+        content = re.sub(r"<h2>(.*?)</h2>", r"<h2>\1</h2>", content)
+        content = re.sub(r"<paragraph>(.*?)</paragraph>", r"<p>\1</p>", content)
+        content = re.sub(r"<line\s*/?>", r"<hr>", content)
 
-    # Replace <callout>...</callout>
-    content = re.sub(r"<callout>(.*?)</callout>",
-                     lambda m: TEMPLATES["callout"].format(body=m.group(1)),
-                     content, flags=re.DOTALL)
+        content = re.sub(
+            r"<accordion>\s*Title:\s*(?P<title>.*?)\s*Content:\s*(?P<body>.*?)</accordion>",
+            lambda m: TEMPLATES["accordion"](m.group("title").strip(), m.group("body").strip()),
+            content,
+            flags=re.DOTALL
+        )
 
-    # Replace <bullets>...</bullets>
-    content = re.sub(r"<bullets>(.*?)</bullets>",
-                     lambda m: TEMPLATES["bullets"](m.group(1)),
-                     content, flags=re.DOTALL)
+        content = re.sub(r"<callout>(.*?)</callout>", lambda m: TEMPLATES["callout"](m.group(1).strip()), content, flags=re.DOTALL)
 
-    return content
+        def bullets_repl(match):
+            items = match.group(0)
+            return TEMPLATES["bullets"](items)
 
-# --- Text Parsing from DOCX ---
-def extract_canvas_pages(docx_file):
-    doc = Document(docx_file)
-    full_text = '\n'.join([para.text for para in doc.paragraphs])
-    return re.findall(r"<canvas_page>(.*?)</canvas_page>", full_text, re.DOTALL)
+        content = re.sub(r"(?:^|\n)[\-•]\s.*(?:\n[\-•]\s.*)*", bullets_repl, content, flags=re.MULTILINE)
 
-def parse_page_block(block_text):
-    def extract_tag(tag):
-        match = re.search(fr"<{tag}>(.*?)</{tag}>", block_text)
-        return match.group(1).strip() if match else ""
+        output.append({"title": title.strip(), "type": type_.strip(), "module": module.strip(), "html": content.strip()})
 
-    page_type = extract_tag("page_type") or "Pages"
-    page_name = extract_tag("page_name") or "Untitled Page"
-    module_name = extract_tag("module_name") or "General"
-    clean_text = re.sub(r"<(page_type|page_name|module_name)>.*?</\1>", "", block_text, flags=re.DOTALL).strip()
-    return page_type, page_name, module_name, clean_text
+    return output
 
-# --- Main Logic ---
-if uploaded_file and canvas_domain and course_id and token:
-    pages = extract_canvas_pages(uploaded_file)
-    module_cache = {}
+# --- Main Processing ---
+if uploaded_file:
+    doc = Document(uploaded_file)
+    raw_text = "\n".join([p.text for p in doc.paragraphs])
+    pages = convert_storyboard_to_html(raw_text)
 
-    st.subheader("Detected Pages")
-    for i, block in enumerate(pages):
-        page_type, page_title, module_name, raw = parse_page_block(block)
-        html_body = process_html_content(raw)
+    for p in pages:
+        st.markdown(f"### Page: {p['title']} ({p['type']}) in Module: {p['module']}")
+        st.code(p['html'], language="html")
 
-        st.markdown(f"### {i+1}. {page_title} ({page_type}) in {module_name}")
-        st.code(html_body, language="html")
-
-        if st.button(f"Send '{page_title}' to Canvas", key=i):
-            mid = get_or_create_module(module_name, canvas_domain, course_id, token, module_cache)
+        if st.button(f"Send '{p['title']}' to Canvas"):
+            module_cache = {}
+            mid = get_or_create_module(p['module'], canvas_domain, course_id, token, module_cache)
             if not mid:
                 continue
 
-            page_url = create_page(canvas_domain, course_id, page_title, html_body, token)
+            page_url = create_page(canvas_domain, course_id, p['title'], p['html'], token)
             if not page_url:
                 continue
 
-            success = add_to_module(canvas_domain, course_id, mid, page_url, page_title, token)
+            success = add_to_module(canvas_domain, course_id, mid, page_url, p['title'], token)
             if success:
-                st.success(f"✅ {page_type} '{page_title}' added to module '{module_name}'")
+                st.success(f"✅ {p['type']} '{p['title']}' added to module '{p['module']}'")
             else:
-                st.error(f"Failed to add page '{page_title}' to module '{module_name}'")
+                st.error(f"Failed to add page '{p['title']}' to module '{p['module']}'")
