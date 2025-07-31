@@ -9,7 +9,7 @@ import uuid
 import xml.etree.ElementTree as ET
 
 # --- UI Setup ---
-st.set_page_config(page_title="Canvas Storyboard Importer with AI", layout="centered")
+st.set_page_config(page_title="Canvas Storyboard Importer + New Quiz QTI Export", layout="centered")
 st.title("🧩 Canvas Storyboard Importer + New Quiz QTI Export")
 
 canvas_domain = st.text_input("Canvas Base URL (e.g. canvas.instructure.com)")
@@ -77,6 +77,16 @@ def create_qti_package(quiz_title, questions):
         zipf.write(f"{qti_id}/imsmanifest.xml", arcname="imsmanifest.xml")
     return zip_path
 
+# --- Upload QTI to Canvas ---
+def upload_qti_to_canvas(canvas_domain, course_id, token, zip_path):
+    url = f"https://{canvas_domain}/api/v1/courses/{course_id}/content_imports"
+    headers = {"Authorization": f"Bearer {token}"}
+    with open(zip_path, "rb") as f:
+        files = {'attachment': (os.path.basename(zip_path), f, 'application/zip')}
+        data = {'import_type': 'qti'}
+        response = requests.post(url, headers=headers, files=files, data=data)
+    return response.ok, response.text
+
 # --- Parser ---
 def extract_canvas_pages(docx_file):
     doc = Document(docx_file)
@@ -131,7 +141,14 @@ if uploaded_file:
         else:
             st.code(raw)
 
-    if found_new_quiz and st.button("📦 Generate QTI for New Quizzes"):
-        zip_path = create_qti_package("New Quiz from Storyboard", all_new_quiz_questions)
-        with open(zip_path, "rb") as f:
-            st.download_button("⬇️ Download QTI Package", f, file_name=os.path.basename(zip_path))
+    if found_new_quiz:
+        if st.button("📦 Generate and Upload QTI for New Quizzes"):
+            zip_path = create_qti_package("New Quiz from Storyboard", all_new_quiz_questions)
+            if canvas_domain and course_id and token:
+                success, msg = upload_qti_to_canvas(canvas_domain, course_id, token, zip_path)
+                if success:
+                    st.success("✅ QTI package uploaded to Canvas successfully.")
+                else:
+                    st.error(f"❌ Failed to upload QTI: {msg}")
+            with open(zip_path, "rb") as f:
+                st.download_button("⬇️ Download QTI Package", f, file_name=os.path.basename(zip_path))
