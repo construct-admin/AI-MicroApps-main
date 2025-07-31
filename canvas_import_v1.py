@@ -15,10 +15,11 @@ uploaded_file = st.file_uploader("Upload storyboard (.docx)", type="docx")
 
 # --- Custom Component Templates ---
 TEMPLATES = {
-    "accordion": '<div style="background-color:#0077b6;color:#fff;padding:10px;border-radius:5px;margin-bottom:10px;"><strong>{title}</strong><div style="margin-top:5px">{body}</div></div>',
+    "accordion": '<details style="margin: 10px 0; border: 1px solid #ccc; border-radius: 5px; padding: 10px;"><summary style="font-weight: bold; cursor: pointer;">{title}</summary><div style="margin-top:10px">{body}</div></details>',
     "callout": '<div style="border-left:5px solid #2196F3;background:#f1f9ff;padding:10px 15px;margin:10px 0;">{body}</div>',
     "bullets": lambda items: '<ul>' + ''.join([f'<li>{item.strip()}</li>' for item in items.split("\n") if item.strip()]) + '</ul>'
 }
+
 
 # --- Canvas API Integration ---
 def get_or_create_module(module_name, domain, course_id, token, module_cache):
