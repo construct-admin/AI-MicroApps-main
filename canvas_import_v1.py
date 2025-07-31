@@ -48,7 +48,11 @@ def create_page(domain, course_id, title, html_body, token):
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {"wiki_page": {"title": title, "body": html_body, "published": True}}
     response = requests.post(url, headers=headers, json=payload)
-    return response.json().get("url") if response.status_code in (200, 201) else None
+    if response.status_code in (200, 201):
+        return response.json().get("url")
+    else:
+        st.error(f"Failed to create page '{title}': {response.text}")
+        return None
 
 def create_assignment(domain, course_id, title, html_body, token):
     url = f"https://{domain}/api/v1/courses/{course_id}/assignments"
@@ -63,7 +67,53 @@ def create_assignment(domain, course_id, title, html_body, token):
         }
     }
     response = requests.post(url, headers=headers, json=payload)
-    return response.json().get("id") if response.status_code in (200, 201) else None
+    if response.status_code in (200, 201):
+        return response.json().get("id")
+    else:
+        st.error(f"Failed to create assignment '{title}': {response.text}")
+        return None
+
+def create_discussion(domain, course_id, title, html_body, token):
+    url = f"https://{domain}/api/v1/courses/{course_id}/discussion_topics"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {"title": title, "message": html_body, "published": True}
+    response = requests.post(url, headers=headers, json=payload)
+    if response.status_code in (200, 201):
+        return response.json().get("id")
+    else:
+        st.error(f"Failed to create discussion '{title}': {response.text}")
+        return None
+
+def add_to_module(domain, course_id, module_id, item_type, item_ref, title, token):
+    url = f"https://{domain}/api/v1/courses/{course_id}/modules/{module_id}/items"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {"module_item": {"title": title, "type": item_type, "published": True}}
+    if item_type == "Page":
+        payload["module_item"]["page_url"] = item_ref
+    else:
+        payload["module_item"]["content_id"] = item_ref
+
+    response = requests.post(url, headers=headers, json=payload)
+    return response.status_code in (200, 201)
+
+# --- Quiz Question Parser ---
+def parse_quiz_questions(raw):
+    questions = []
+    blocks = re.findall(r"<question><(.*?)>\s*(.*?)</question>", raw, re.DOTALL)
+    for qtype, qbody in blocks:
+        lines = qbody.strip().split("\n")
+        qtext = ""
+        answers = []
+        for line in lines:
+            if not qtext:
+                qtext = line.strip()
+            elif re.match(r"\*?[A-E][.:]", line.strip()):
+                correct = line.strip().startswith("*")
+                text = re.sub(r"^\*?([A-E][.:])", r"\1", line.strip()).strip()
+                answers.append({"text": text, "correct": correct})
+        if qtext:
+            questions.append({"type": qtype.strip().lower(), "text": qtext, "answers": answers})
+    return questions
 
 def create_quiz(domain, course_id, title, html_body, token, questions):
     url = f"https://{domain}/api/v1/courses/{course_id}/quizzes"
@@ -79,41 +129,26 @@ def create_quiz(domain, course_id, title, html_body, token, questions):
     }
     response = requests.post(url, headers=headers, json=payload)
     if response.status_code not in (200, 201):
+        st.error(f"Failed to create quiz '{title}': {response.text}")
         return None
 
     quiz_id = response.json().get("id")
     for q in questions:
+        question_type = "multiple_choice_question" if q['type'] == "multiple choice" else "essay_question"
         question_payload = {
             "question": {
                 "question_name": "Q",
                 "question_text": q['text'],
-                "question_type": "multiple_choice_question",
+                "question_type": question_type,
                 "points_possible": 1,
                 "answers": [
-                    {"text": a['text'], "weight": 100 if a['correct'] else 0} for a in q['answers']
-                ]
+                    {"text": a['text'], "weight": 100 if a['correct'] else 0} for a in q.get('answers', [])
+                ] if question_type == "multiple_choice_question" else []
             }
         }
         q_url = f"https://{domain}/api/v1/courses/{course_id}/quizzes/{quiz_id}/questions"
         requests.post(q_url, headers=headers, json=question_payload)
     return quiz_id
-
-def create_discussion(domain, course_id, title, html_body, token):
-    url = f"https://{domain}/api/v1/courses/{course_id}/discussion_topics"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {"title": title, "message": html_body, "published": True}
-    response = requests.post(url, headers=headers, json=payload)
-    return response.json().get("id") if response.status_code in (200, 201) else None
-
-def add_item_to_module(domain, course_id, module_id, item_type, item_id_or_url, title, token):
-    url = f"https://{domain}/api/v1/courses/{course_id}/modules/{module_id}/items"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    if item_type == "Page":
-        payload = {"module_item": {"title": title, "type": "Page", "page_url": item_id_or_url, "published": True}}
-    else:
-        payload = {"module_item": {"title": title, "type": item_type, "content_id": item_id_or_url, "published": True}}
-    response = requests.post(url, headers=headers, json=payload)
-    return response.status_code in (200, 201)
 
 # --- Text Parsing ---
 def extract_canvas_pages(docx_file):
@@ -163,61 +198,6 @@ def process_html_content(raw_text):
 
     return convert_bullets(content)
 
-# --- Quiz Question Parser ---
-def parse_quiz_questions(raw):
-    questions = []
-    blocks = re.findall(r"<question><(.*?)>\s*(.*?)</question>", raw, re.DOTALL)
-    for qtype, qbody in blocks:
-        lines = qbody.strip().split("\n")
-        qtext = ""
-        answers = []
-        for line in lines:
-            if not qtext:
-                qtext = line.strip()
-            elif re.match(r"\*?[A-E]\.", line.strip()):
-                correct = line.strip().startswith("*")
-                text = re.sub(r"^\*?([A-E]\.)", r"\1", line.strip()).strip()
-                answers.append({"text": text, "correct": correct})
-        if qtext:
-            questions.append({"type": qtype.strip().lower(), "text": qtext, "answers": answers})
-    return questions
-
-# --- create_quiz (Updated to use parsed type) ---
-def create_quiz(domain, course_id, title, html_body, token, questions):
-    url = f"https://{domain}/api/v1/courses/{course_id}/quizzes"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {
-        "quiz": {
-            "title": title,
-            "description": html_body,
-            "published": True,
-            "quiz_type": "assignment",
-            "scoring_policy": "keep_highest"
-        }
-    }
-    response = requests.post(url, headers=headers, json=payload)
-    if response.status_code not in (200, 201):
-        return None
-
-    quiz_id = response.json().get("id")
-    for q in questions:
-        question_type = "multiple_choice_question" if q['type'] == "multiple choice" else "essay_question"
-        question_payload = {
-            "question": {
-                "question_name": "Q",
-                "question_text": q['text'],
-                "question_type": question_type,
-                "points_possible": 1,
-                "answers": [
-                    {"text": a['text'], "weight": 100 if a['correct'] else 0} for a in q.get('answers', [])
-                ] if question_type == "multiple_choice_question" else []
-            }
-        }
-        q_url = f"https://{domain}/api/v1/courses/{course_id}/quizzes/{quiz_id}/questions"
-        requests.post(q_url, headers=headers, json=question_payload)
-    return quiz_id
-
-
 # --- Main Logic ---
 if uploaded_file and canvas_domain and course_id and token:
     pages = extract_canvas_pages(uploaded_file)
@@ -227,6 +207,7 @@ if uploaded_file and canvas_domain and course_id and token:
     for i, block in enumerate(pages):
         page_type, page_title, module_name, raw = parse_page_block(block)
         html_body = process_html_content(raw)
+
         st.markdown(f"### {i+1}. {page_title} ({page_type}) in {module_name}")
         st.code(html_body, language="html")
 
@@ -237,21 +218,21 @@ if uploaded_file and canvas_domain and course_id and token:
 
             if page_type == "assignment":
                 aid = create_assignment(canvas_domain, course_id, page_title, html_body, token)
-                if aid and add_item_to_module(canvas_domain, course_id, mid, "Assignment", aid, page_title, token):
+                if aid and add_to_module(canvas_domain, course_id, mid, "Assignment", aid, page_title, token):
                     st.success(f"✅ Assignment '{page_title}' created and added to '{module_name}'")
 
             elif page_type == "quiz":
-                questions = parse_quiz_questions(raw)
-                qid = create_quiz(canvas_domain, course_id, page_title, html_body, token, questions)
-                if qid and add_item_to_module(canvas_domain, course_id, mid, "Quiz", qid, page_title, token):
+                quiz_questions = parse_quiz_questions(raw)
+                qid = create_quiz(canvas_domain, course_id, page_title, html_body, token, quiz_questions)
+                if qid and add_to_module(canvas_domain, course_id, mid, "Quiz", qid, page_title, token):
                     st.success(f"✅ Quiz '{page_title}' created and added to '{module_name}'")
 
             elif page_type == "discussion":
                 did = create_discussion(canvas_domain, course_id, page_title, html_body, token)
-                if did and add_item_to_module(canvas_domain, course_id, mid, "Discussion", did, page_title, token):
+                if did and add_to_module(canvas_domain, course_id, mid, "Discussion", did, page_title, token):
                     st.success(f"✅ Discussion '{page_title}' created and added to '{module_name}'")
 
             else:
                 page_url = create_page(canvas_domain, course_id, page_title, html_body, token)
-                if page_url and add_item_to_module(canvas_domain, course_id, mid, "Page", page_url, page_title, token):
+                if page_url and add_to_module(canvas_domain, course_id, mid, "Page", page_url, page_title, token):
                     st.success(f"✅ Page '{page_title}' created and added to '{module_name}'")
