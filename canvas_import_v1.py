@@ -62,6 +62,26 @@ def add_to_module(domain, course_id, module_id, page_url, title, token):
     response = requests.post(url, headers=headers, json=payload)
     return response.status_code in (200, 201)
 
+def create_assignment(domain, course_id, title, html_body, token):
+    url = f"https://{domain}/api/v1/courses/{course_id}/assignments"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {
+        "assignment": {
+            "name": title,
+            "description": html_body,
+            "published": True,
+            "submission_types": ["online_text_entry"],  # Default for now
+            "points_possible": 10
+        }
+    }
+    response = requests.post(url, headers=headers, json=payload)
+    if response.status_code in (200, 201):
+        return response.json().get("id")
+    else:
+        st.error(f"❌ Failed to create assignment '{title}': {response.text}")
+        return None
+
+
 # --- AI HTML Conversion (or Fallback to Regex Template Injection) ---
 def process_html_content(raw_text):
     content = raw_text
@@ -122,6 +142,12 @@ if uploaded_file and canvas_domain and course_id and token:
             if not mid:
                 continue
 
+        if page_type.lower() == "assignment":
+            assignment_id = create_assignment(canvas_domain, course_id, page_title, html_body, token)
+            if not assignment_id:
+                continue
+            st.success(f"✅ Assignment '{page_title}' created successfully.")
+        else:
             page_url = create_page(canvas_domain, course_id, page_title, html_body, token)
             if not page_url:
                 continue
@@ -131,3 +157,4 @@ if uploaded_file and canvas_domain and course_id and token:
                 st.success(f"✅ {page_type} '{page_title}' added to module '{module_name}'")
             else:
                 st.error(f"Failed to add page '{page_title}' to module '{module_name}'")
+
