@@ -169,9 +169,16 @@ def parse_page_block(block_text):
 # --- HTML Processing ---
 def process_html_content(raw_text):
     content = raw_text
+
+    # Remove <question> blocks (they're parsed separately for quizzes)
+    content = re.sub(r"<question><.*?>.*?</question>", "", content, flags=re.DOTALL)
+
+    # Convert <accordion> to styled HTML
     content = re.sub(r"<accordion>\s*Title:\s*(.*?)\s*Content:\s*(.*?)</accordion>",
                      lambda m: TEMPLATES["accordion"].format(title=m.group(1).strip(), body=m.group(2).strip()),
                      content, flags=re.DOTALL)
+
+    # Convert <callout> to blockquote
     content = re.sub(r"<callout>(.*?)</callout>",
                      lambda m: TEMPLATES["callout"].format(body=m.group(1)),
                      content, flags=re.DOTALL)
@@ -197,6 +204,7 @@ def process_html_content(raw_text):
         return '\n'.join(out)
 
     return convert_bullets(content)
+
 
 # --- Main Logic ---
 if uploaded_file and canvas_domain and course_id and token:
