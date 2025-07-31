@@ -65,7 +65,7 @@ def create_assignment(domain, course_id, title, html_body, token):
     response = requests.post(url, headers=headers, json=payload)
     return response.json().get("id") if response.status_code in (200, 201) else None
 
-def create_quiz(domain, course_id, title, html_body, token):
+def create_quiz(domain, course_id, title, html_body, token, questions):
     url = f"https://{domain}/api/v1/courses/{course_id}/quizzes"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {
@@ -78,7 +78,25 @@ def create_quiz(domain, course_id, title, html_body, token):
         }
     }
     response = requests.post(url, headers=headers, json=payload)
-    return response.json().get("id") if response.status_code in (200, 201) else None
+    if response.status_code not in (200, 201):
+        return None
+
+    quiz_id = response.json().get("id")
+    for q in questions:
+        question_payload = {
+            "question": {
+                "question_name": "Q",
+                "question_text": q['text'],
+                "question_type": "multiple_choice_question",
+                "points_possible": 1,
+                "answers": [
+                    {"text": a['text'], "weight": 100 if a['correct'] else 0} for a in q['answers']
+                ]
+            }
+        }
+        q_url = f"https://{domain}/api/v1/courses/{course_id}/quizzes/{quiz_id}/questions"
+        requests.post(q_url, headers=headers, json=question_payload)
+    return quiz_id
 
 def create_discussion(domain, course_id, title, html_body, token):
     url = f"https://{domain}/api/v1/courses/{course_id}/discussion_topics"
@@ -145,6 +163,25 @@ def process_html_content(raw_text):
 
     return convert_bullets(content)
 
+# --- Quiz Question Parser ---
+def parse_quiz_questions(raw):
+    questions = []
+    blocks = re.findall(r"<question>(.*?)</question>", raw, re.DOTALL)
+    for b in blocks:
+        lines = b.strip().split("\n")
+        qtext = ""
+        answers = []
+        for line in lines:
+            if not qtext:
+                qtext = line.strip()
+            elif re.match(r"\*?[A-D]\.", line.strip()):
+                correct = line.strip().startswith("*")
+                text = re.sub(r"^\*?([A-D]\.)", r"\1", line.strip()).strip()
+                answers.append({"text": text, "correct": correct})
+        if qtext:
+            questions.append({"text": qtext, "answers": answers})
+    return questions
+
 # --- Main Logic ---
 if uploaded_file and canvas_domain and course_id and token:
     pages = extract_canvas_pages(uploaded_file)
@@ -154,7 +191,6 @@ if uploaded_file and canvas_domain and course_id and token:
     for i, block in enumerate(pages):
         page_type, page_title, module_name, raw = parse_page_block(block)
         html_body = process_html_content(raw)
-
         st.markdown(f"### {i+1}. {page_title} ({page_type}) in {module_name}")
         st.code(html_body, language="html")
 
@@ -169,7 +205,8 @@ if uploaded_file and canvas_domain and course_id and token:
                     st.success(f"✅ Assignment '{page_title}' created and added to '{module_name}'")
 
             elif page_type == "quiz":
-                qid = create_quiz(canvas_domain, course_id, page_title, html_body, token)
+                questions = parse_quiz_questions(raw)
+                qid = create_quiz(canvas_domain, course_id, page_title, html_body, token, questions)
                 if qid and add_item_to_module(canvas_domain, course_id, mid, "Quiz", qid, page_title, token):
                     st.success(f"✅ Quiz '{page_title}' created and added to '{module_name}'")
 
