@@ -166,24 +166,56 @@ def process_html_content(raw_text):
 # --- Quiz Question Parser ---
 def parse_quiz_questions(raw):
     questions = []
-    blocks = re.findall(r"<question>(.*?)</question>", raw, re.DOTALL)
-    for b in blocks:
-        lines = b.strip().split("\n")
+    blocks = re.findall(r"<question><(.*?)>\s*(.*?)</question>", raw, re.DOTALL)
+    for qtype, qbody in blocks:
+        lines = qbody.strip().split("\n")
         qtext = ""
         answers = []
         for line in lines:
-            clean_line = line.strip()
             if not qtext:
-                # Remove any tag-like info from the first line
-                clean_line = re.sub(r"<.*?>", "", clean_line).strip()
-                qtext = clean_line
-            elif re.match(r"\*?[A-Z]\.", clean_line):
-                correct = clean_line.startswith("*")
-                text = re.sub(r"^\*?([A-Z]\.)", r"\1", clean_line).strip()
+                qtext = line.strip()
+            elif re.match(r"\*?[A-E]\.", line.strip()):
+                correct = line.strip().startswith("*")
+                text = re.sub(r"^\*?([A-E]\.)", r"\1", line.strip()).strip()
                 answers.append({"text": text, "correct": correct})
         if qtext:
-            questions.append({"text": qtext, "answers": answers})
+            questions.append({"type": qtype.strip().lower(), "text": qtext, "answers": answers})
     return questions
+
+# --- create_quiz (Updated to use parsed type) ---
+def create_quiz(domain, course_id, title, html_body, token, questions):
+    url = f"https://{domain}/api/v1/courses/{course_id}/quizzes"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {
+        "quiz": {
+            "title": title,
+            "description": html_body,
+            "published": True,
+            "quiz_type": "assignment",
+            "scoring_policy": "keep_highest"
+        }
+    }
+    response = requests.post(url, headers=headers, json=payload)
+    if response.status_code not in (200, 201):
+        return None
+
+    quiz_id = response.json().get("id")
+    for q in questions:
+        question_type = "multiple_choice_question" if q['type'] == "multiple choice" else "essay_question"
+        question_payload = {
+            "question": {
+                "question_name": "Q",
+                "question_text": q['text'],
+                "question_type": question_type,
+                "points_possible": 1,
+                "answers": [
+                    {"text": a['text'], "weight": 100 if a['correct'] else 0} for a in q.get('answers', [])
+                ] if question_type == "multiple_choice_question" else []
+            }
+        }
+        q_url = f"https://{domain}/api/v1/courses/{course_id}/quizzes/{quiz_id}/questions"
+        requests.post(q_url, headers=headers, json=question_payload)
+    return quiz_id
 
 
 # --- Main Logic ---
