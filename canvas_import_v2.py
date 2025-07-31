@@ -53,6 +53,7 @@ Replace the following tags with valid HTML (using inline CSS):
 - <callout> → <blockquote><p>...</p></blockquote>
 - Bullet points starting with '-' → <ul><li>...</li></ul>
 - <question><multiple choice> → Leave these blocks in-place for structured Canvas parsing
+- if there are no <...> tags, do not add in tags or restructure, just convert to HTML.
 
 Keep paragraphs and indentation intact.
 
