@@ -15,7 +15,7 @@ uploaded_file = st.file_uploader("Upload storyboard (.docx)", type="docx")
 
 # --- Custom Component Templates ---
 TEMPLATES = {
-    "accordion": '<details><summary style="cursor: pointer;">{title}<small> (click to reveal) </small></summary><p style="padding-left: 40px;">{body}</p></details>',
+    "accordion": '<details><summary style="cursor: pointer; font-weight: bold;">{title} <small>(click to reveal)</small></summary><div style="padding-left: 20px; margin-top: 10px;">{body}</div></details>',
     "callout": '<blockquote><p>{body}</p></blockquote>',
     "bullets": lambda items: '<ul>' + ''.join([f'<li>{item.strip().lstrip("-•").strip()}</li>' for item in items.split("\n") if item.strip()]) + '</ul>'
 }
