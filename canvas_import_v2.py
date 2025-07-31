@@ -44,50 +44,30 @@ def convert_bullets(text):
 # --- OpenAI HTML Conversion ---
 def convert_to_html_with_openai(docx_text, fallback_html):
     try:
-        openai.api_key = st.secrets["OPENAI_API_KEY"]
-        prompt = f"""
-You are an expert HTML generator for Canvas LMS content.
+        client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+        prompt = f"""Convert the following storyboard content to HTML. Preserve formatting like headings, bold, lists, and replace tagged blocks like <accordion>, <callout>, <question> etc. using inline CSS-friendly HTML.
 
-Convert the following storyboard content into valid HTML. Your goal is to:
-- Preserve all original formatting such as paragraphs, bold, italics, underline, and headings (e.g., Heading 1, Heading 2, etc.)
-- Convert bullets starting with '-' into proper HTML unordered lists (<ul><li>)
-- Convert custom tag blocks into inline CSS-friendly HTML using the following rules:
-
-1. <accordion>Title: ... Content: ...</accordion>
-   ➜ Replace with:
-   <details><summary style="cursor: pointer; font-weight: bold; background-color:#0077b6; color:white; padding:10px; border-radius:5px;">{{title}} <small>(click to reveal)</small></summary><div style="padding:10px 20px; margin-top: 10px; background-color:#f2f2f2; color:#333;">{{body}}</div></details>
-
-2. <callout>...</callout>
-   ➜ Replace with:
-   <blockquote><p>{{body}}</p></blockquote>
-
-3. <question><multiple choice>
-   What does ...?
-   A: ...
-   *B: ...
-   C: ...
-   </question>
-   ➜ This is a quiz question block.
-   - The first line is the question text.
-   - A–E options are answer choices.
-   - The correct answer is marked with a '*' at the beginning of the line.
-   - Do not include this question in the HTML body—these are parsed separately.
-
-Return only the full HTML body content—no explanations.
+Use:
+- <details><summary style="cursor: pointer; font-weight: bold; background-color:#0077b6; color:white; padding:10px; border-radius:5px;">{title} <small>(click to reveal)</small></summary><div style="padding:10px 20px; margin-top: 10px; background-color:#f2f2f2; color:#333;">{body}</div></details> for accordions.
+- <blockquote><p>...</p></blockquote> for callouts.
+- Use <ul><li> for bullets starting with '-'.
+- Quiz questions with <question><multiple choice> tags should remain structurally tagged for programmatic parsing.
+- Preserve formatting (e.g., headings, bold, italics) and structure from the source.
 
 Storyboard Content:
 {docx_text}
-"""
-        response = openai.ChatCompletion.create(
+
+Only output valid HTML."""
+        response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
         )
-        html = response['choices'][0]['message']['content'].strip()
-        return html
+        return response.choices[0].message.content.strip()
     except Exception as e:
         st.warning(f"⚠️ OpenAI processing failed, using fallback: {e}")
         return fallback_html
+
 
 
 
