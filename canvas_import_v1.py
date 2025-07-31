@@ -66,10 +66,14 @@ def add_to_module(domain, course_id, module_id, page_url, title, token):
 def process_html_content(raw_text):
     content = raw_text
 
-    # Replace <accordion title=...>...</accordion>
-    content = re.sub(r"<accordion title=\"(.*?)\">(.*?)</accordion>",
-                     lambda m: TEMPLATES["accordion"].format(title=m.group(1), body=m.group(2)),
-                     content, flags=re.DOTALL)
+    # Replace <accordion> with Title/Content format
+    content = re.sub(
+        r"<accordion>\s*Title:\s*(.*?)\s*Content:\s*(.*?)</accordion>",
+        lambda m: TEMPLATES["accordion"].format(title=m.group(1).strip(), body=m.group(2).strip()),
+        content,
+        flags=re.DOTALL
+    )
+
 
     # Replace <callout>...</callout>
     content = re.sub(r"<callout>(.*?)</callout>",
