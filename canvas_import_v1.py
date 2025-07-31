@@ -143,19 +143,19 @@ def create_canvas_item(course_id, module_id, item_type, title, html_body, token,
 def main():
     st.set_page_config(page_title="Canvas Storyboard Importer")
     st.title("Canvas Storyboard Importer")
+    canvas_domain = st.text_input("Canvas Domain (e.g., canvas.instructure.com):")
+    canvas_token = st.text_input("Canvas API Token:", type="password")
+    canvas_course_id = st.text_input("Canvas Course ID:")
+
     uploaded_file = st.file_uploader("Upload DOCX with <canvas_page> tags", type=["docx"])
 
-    if uploaded_file:
+    if uploaded_file and canvas_token and canvas_domain and canvas_course_id:
         pages = extract_canvas_pages(uploaded_file)
         if not pages:
             st.warning("No <canvas_page> blocks found.")
             return
 
-        token = st.secrets.get("CANVAS_ACCESS_TOKEN")
-        domain = st.secrets.get("CANVAS_DOMAIN")
-        course_id = st.secrets.get("CANVAS_COURSE_ID")
         module_cache = {}
-
         for page in pages:
             page_type, page_title, module_name, raw_content = parse_page_block(page)
             st.markdown(f"### Processing: {page_title} ({page_type}) in Module '{module_name}'")
@@ -165,13 +165,15 @@ def main():
                 html = convert_tags_to_html(raw_content)
 
             if html:
-                mid = get_or_create_module(course_id, module_name, token, domain, module_cache)
+                mid = get_or_create_module(canvas_course_id, module_name, canvas_token, canvas_domain, module_cache)
                 if mid:
-                    create_canvas_item(course_id, mid, page_type, page_title, html, token, domain)
+                    create_canvas_item(canvas_course_id, mid, page_type, page_title, html, canvas_token, canvas_domain)
                 else:
                     st.error(f"Failed to create/find module: {module_name}")
             else:
                 st.error("HTML conversion failed.")
+    else:
+        st.info("Please enter all Canvas details and upload a file to begin.")
 
 if __name__ == "__main__":
     main()
