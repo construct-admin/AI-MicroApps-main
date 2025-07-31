@@ -42,6 +42,7 @@ def parse_page_block(block_text):
 def generate_html_via_ai(page_title, module_title, content):
     openai_api_key = st.secrets.get("OPENAI_API_KEY")
     if not openai_api_key:
+        st.warning("Missing OpenAI key — falling back to manual tag conversion.")
         return None
 
     headers = {
@@ -59,8 +60,13 @@ def generate_html_via_ai(page_title, module_title, content):
         "temperature": 0.3
     })
 
+    st.write("OpenAI API Response Status:", response.status_code)
+
     if response.status_code == 200:
-        return response.json()["choices"][0]["message"]["content"].strip("`")
+        result = response.json()
+        st.write("AI Response:", result)
+        return result["choices"][0]["message"]["content"].strip("`")
+    st.error(f"OpenAI API error: {response.status_code} - {response.text}")
     return None
 
 # ---------------------------
@@ -93,6 +99,9 @@ def get_or_create_module(course_id, module_name, token, domain, module_cache):
     url = f"https://{domain}/api/v1/courses/{course_id}/modules"
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(url, headers=headers)
+    st.write("Fetching existing modules:", resp.status_code)
+    st.write(resp.json())
+
     if resp.status_code == 200:
         for m in resp.json():
             if m["name"].strip().lower() == module_name.strip().lower():
@@ -100,106 +109,31 @@ def get_or_create_module(course_id, module_name, token, domain, module_cache):
                 return m["id"]
     time.sleep(1)
     resp = requests.post(url, headers=headers, json={"name": module_name, "published": True})
+    st.write("Creating new module:", resp.status_code, resp.json())
     if resp.status_code in (200, 201):
         mid = resp.json().get("id")
         module_cache[module_name] = mid
         return mid
     return None
 
-def post_to_canvas(course_id, title, html_body, token, domain, page_type):
+# New Canvas Item Creation and Module Insertion Logic
+def create_canvas_item(course_id, module_id, item_type, title, html_body, token, domain):
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    base = f"https://{domain}/api/v1/courses/{course_id}"
-    item_ref = None
-    r = None
-
-    if page_type == "Pages":
-        url = f"{base}/pages"
-        payload = {"wiki_page": {"title": title, "body": html_body, "published": True}}
-        r = requests.post(url, headers=headers, json=payload)
-        if r.status_code in (200, 201):
-            item_ref = r.json().get("url")
-    elif page_type == "Assignments":
-        url = f"{base}/assignments"
-        payload = {"assignment": {"name": title, "description": html_body, "submission_types": ["online_text_entry"], "published": True}}
-        r = requests.post(url, headers=headers, json=payload)
-        if r.status_code in (200, 201):
-            item_ref = r.json().get("id")
-    elif page_type == "Quizzes":
-        url = f"{base}/quizzes"
-        payload = {"quiz": {"title": title, "description": html_body, "quiz_type": "assignment", "published": True}}
-        r = requests.post(url, headers=headers, json=payload)
-        if r.status_code in (200, 201):
-            item_ref = r.json().get("id")
+    if item_type == "Pages":
+        page_url = title.lower().replace(" ", "-")
+        page_resp = requests.post(
+            f"https://{domain}/api/v1/courses/{course_id}/pages",
+            headers=headers,
+            json={"wiki_page": {"title": title, "body": html_body, "published": PUBLISHED}}
+        )
+        st.write(f"Created page: {title}", page_resp.status_code, page_resp.json())
+        if page_resp.status_code in (200, 201):
+            item_resp = requests.post(
+                f"https://{domain}/api/v1/courses/{course_id}/modules/{module_id}/items",
+                headers=headers,
+                json={"module_item": {"title": title, "type": "Page", "page_url": page_url, "published": PUBLISHED}}
+            )
+            st.write(f"Added page to module: {title}", item_resp.status_code, item_resp.json())
     else:
-        url = f"{base}/discussion_topics"
-        payload = {"title": title, "message": html_body, "published": True}
-        r = requests.post(url, headers=headers, json=payload)
-        if r.status_code in (200, 201):
-            item_ref = r.json().get("id")
-
-    return r.status_code, item_ref
-
-def add_to_module(course_id, module_id, item_type, item_ref, token, domain):
-    url = f"https://{domain}/api/v1/courses/{course_id}/modules/{module_id}/items"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {"module_item": {"type": item_type, "published": True}}
-
-    if item_type == "Page":
-        payload["module_item"]["page_url"] = item_ref
-    else:
-        payload["module_item"]["content_id"] = item_ref
-
-    for attempt in range(3):
-        response = requests.post(url, headers=headers, json=payload)
-        if response.status_code in (200, 201):
-            return response
-        elif response.status_code == 422:
-            st.error(f"⚠️ Invalid module item payload: {response.json()}")
-            break
-        elif response.status_code == 404:
-            st.error("❌ Content not found when trying to add to module. Make sure the page/assignment/quiz was created correctly.")
-        time.sleep(2 + attempt)
-    return response
-
-# ---------------------------
-# Streamlit App
-# ---------------------------
-st.set_page_config(page_title="Canvas Storyboard Importer", layout="centered")
-st.title("🧩 Canvas Storyboard Importer with AI HTML Support")
-
-uploaded = st.file_uploader("Upload storyboard (.docx)", type="docx")
-course_id = st.text_input("Canvas Course ID")
-domain = st.text_input("Canvas Domain", placeholder="canvas.instructure.com")
-token = st.text_input("Canvas API Token", type="password")
-
-if uploaded and course_id and domain and token:
-    pages = extract_canvas_pages(uploaded)
-    module_cache = {}
-    st.subheader("Detected Pages")
-    for i, block in enumerate(pages):
-        ptype, pname, mname, raw = parse_page_block(block)
-
-        html = generate_html_via_ai(pname, mname, raw)
-        if not html:
-            html = convert_tags_to_html(raw)
-
-        with st.expander(f"{i+1}. {pname} ({ptype} in '{mname}')"):
-            st.code(html, language="html")
-            if st.button(f"Send '{pname}' to Canvas", key=i):
-                mid = get_or_create_module(course_id, mname, token, domain, module_cache)
-                if not mid:
-                    st.error(f"❌ Failed to get/create module '{mname}'")
-                    continue
-
-                status, ref = post_to_canvas(course_id, pname, html, token, domain, ptype)
-
-                if status in (200, 201) and ref:
-                    time.sleep(2)
-                    itype = "Page" if ptype == "Pages" else ptype[:-1].capitalize()
-                    modr = add_to_module(course_id, mid, itype, ref, token, domain)
-                    if modr.status_code in (200, 201):
-                        st.success(f"✅ {ptype} '{pname}' added to module '{mname}'!")
-                    else:
-                        st.error(f"⚠️ Created but failed to add to module: {modr.text}")
-                else:
-                    st.error(f"❌ Failed to create {ptype} '{pname}' (Status: {status}, Ref: {ref})")
+        # Placeholder for Assignments, Quizzes, Discussions
+        st.warning(f"Item type '{item_type}' not implemented yet.")
