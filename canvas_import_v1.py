@@ -135,5 +135,43 @@ def create_canvas_item(course_id, module_id, item_type, title, html_body, token,
             )
             st.write(f"Added page to module: {title}", item_resp.status_code, item_resp.json())
     else:
-        # Placeholder for Assignments, Quizzes, Discussions
         st.warning(f"Item type '{item_type}' not implemented yet.")
+
+# ---------------------------
+# Streamlit UI Flow
+# ---------------------------
+def main():
+    st.set_page_config(page_title="Canvas Storyboard Importer")
+    st.title("Canvas Storyboard Importer")
+    uploaded_file = st.file_uploader("Upload DOCX with <canvas_page> tags", type=["docx"])
+
+    if uploaded_file:
+        pages = extract_canvas_pages(uploaded_file)
+        if not pages:
+            st.warning("No <canvas_page> blocks found.")
+            return
+
+        token = st.secrets.get("CANVAS_ACCESS_TOKEN")
+        domain = st.secrets.get("CANVAS_DOMAIN")
+        course_id = st.secrets.get("CANVAS_COURSE_ID")
+        module_cache = {}
+
+        for page in pages:
+            page_type, page_title, module_name, raw_content = parse_page_block(page)
+            st.markdown(f"### Processing: {page_title} ({page_type}) in Module '{module_name}'")
+
+            html = generate_html_via_ai(page_title, module_name, raw_content)
+            if not html:
+                html = convert_tags_to_html(raw_content)
+
+            if html:
+                mid = get_or_create_module(course_id, module_name, token, domain, module_cache)
+                if mid:
+                    create_canvas_item(course_id, mid, page_type, page_title, html, token, domain)
+                else:
+                    st.error(f"Failed to create/find module: {module_name}")
+            else:
+                st.error("HTML conversion failed.")
+
+if __name__ == "__main__":
+    main()
