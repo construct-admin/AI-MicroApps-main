@@ -46,39 +46,40 @@ def get_or_create_module(module_name, domain, course_id, token, module_cache):
 
 # --- Replace Storyboard Tags with HTML ---
 def convert_storyboard_to_html(text):
-    text = re.sub(r"<h2>(.*?)</h2>", r"<h2>\1</h2>", text)
-    text = re.sub(r"<paragraph>(.*?)</paragraph>", r"<p>\1</p>", text)
-    text = re.sub(r"<line\s*/?>", r"<hr>", text)
+    pages = re.split(r"<page name=['\"](.*?)['\"] type=['\"](.*?)['\"] module=['\"](.*?)['\"]>", text)
+    output = []
+    for i in range(1, len(pages), 4):
+        title, type_, module, content = pages[i], pages[i+1], pages[i+2], pages[i+3]
 
-    # Handle accordion tags
-    def accordion_repl(match):
-        title = match.group("title").strip()
-        body = match.group("body").strip()
-        return TEMPLATES["accordion"](title, body)
+        content = re.sub(r"<h2>(.*?)</h2>", r"<h2>\1</h2>", content)
+        content = re.sub(r"<paragraph>(.*?)</paragraph>", r"<p>\1</p>", content)
+        content = re.sub(r"<line\s*/?>", r"<hr>", content)
 
-    text = re.sub(
-        r"<accordion>\s*Title:\s*(?P<title>.*?)\s*Content:\s*(?P<body>.*?)</accordion>",
-        accordion_repl,
-        text,
-        flags=re.DOTALL
-    )
+        content = re.sub(
+            r"<accordion>\s*Title:\s*(?P<title>.*?)\s*Content:\s*(?P<body>.*?)</accordion>",
+            lambda m: TEMPLATES["accordion"](m.group("title").strip(), m.group("body").strip()),
+            content,
+            flags=re.DOTALL
+        )
 
-    # Handle callout tags
-    text = re.sub(r"<callout>(.*?)</callout>", lambda m: TEMPLATES["callout"](m.group(1).strip()), text, flags=re.DOTALL)
+        content = re.sub(r"<callout>(.*?)</callout>", lambda m: TEMPLATES["callout"](m.group(1).strip()), content, flags=re.DOTALL)
 
-    # Handle bullet list conversion from lines starting with - or •
-    def bullets_repl(match):
-        items = match.group(0)
-        return TEMPLATES["bullets"](items)
+        def bullets_repl(match):
+            items = match.group(0)
+            return TEMPLATES["bullets"](items)
 
-    text = re.sub(r"(?:^|\n)[\-•]\s.*(?:\n[\-•]\s.*)*", bullets_repl, text, flags=re.MULTILINE)
+        content = re.sub(r"(?:^|\n)[\-•]\s.*(?:\n[\-•]\s.*)*", bullets_repl, content, flags=re.MULTILINE)
 
-    return text
+        output.append({"title": title.strip(), "type": type_.strip(), "module": module.strip(), "html": content.strip()})
+
+    return output
 
 # --- Main Processing ---
 if uploaded_file:
     doc = Document(uploaded_file)
     raw_text = "\n".join([p.text for p in doc.paragraphs])
-    html_output = convert_storyboard_to_html(raw_text)
-    st.subheader("Generated HTML")
-    st.code(html_output, language="html")
+    pages = convert_storyboard_to_html(raw_text)
+
+    for p in pages:
+        st.markdown(f"### Page: {p['title']} ({p['type']}) in Module: {p['module']}")
+        st.code(p['html'], language="html")
