@@ -44,7 +44,9 @@ def convert_bullets(text):
 # --- OpenAI HTML Conversion ---
 def convert_to_html_with_openai(docx_text, fallback_html):
     try:
-        openai.api_key = st.secrets["OPENAI_API_KEY"]
+        from openai import OpenAI
+        client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+
         prompt = f"""Convert the following storyboard content to HTML. Preserve formatting like headings, bold, lists, and replace tagged blocks like <accordion>, <callout>, <question> etc. using inline CSS-friendly HTML.
 
 Use:
@@ -58,16 +60,18 @@ Storyboard Content:
 {docx_text}
 
 Only output the full HTML body. No explanations."""
-        response = openai.ChatCompletion.create(
+
+        response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
         )
-        html = response['choices'][0]['message']['content'].strip()
+        html = response.choices[0].message.content.strip()
         return html
     except Exception as e:
         st.warning(f"⚠️ OpenAI processing failed, using fallback: {e}")
         return fallback_html
+
 
 # --- Canvas API Integration ---
 def get_or_create_module(module_name, domain, course_id, token, module_cache):
