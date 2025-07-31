@@ -55,6 +55,18 @@ def create_page(domain, course_id, title, html_body, token):
         st.error(f"Failed to create page '{title}': {response.text}")
         return None
 
+def add_item_to_module(domain, course_id, module_id, item_type, item_id_or_url, title, token):
+    url = f"https://{domain}/api/v1/courses/{course_id}/modules/{module_id}/items"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    if item_type == "Page":
+        payload = {"module_item": {"title": title, "type": "Page", "page_url": item_id_or_url, "published": True}}
+    else:
+        payload = {"module_item": {"title": title, "type": item_type, "content_id": item_id_or_url, "published": True}}
+
+    response = requests.post(url, headers=headers, json=payload)
+    return response.status_code in (200, 201)
+
 def create_assignment(domain, course_id, title, html_body, token):
     url = f"https://{domain}/api/v1/courses/{course_id}/assignments"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -68,11 +80,7 @@ def create_assignment(domain, course_id, title, html_body, token):
         }
     }
     response = requests.post(url, headers=headers, json=payload)
-    if response.status_code in (200, 201):
-        return response.json().get("id")
-    else:
-        st.error(f"❌ Failed to create assignment '{title}': {response.text}")
-        return None
+    return response.json().get("id") if response.status_code in (200, 201) else None
 
 def create_quiz(domain, course_id, title, html_body, token):
     url = f"https://{domain}/api/v1/courses/{course_id}/quizzes"
@@ -87,35 +95,16 @@ def create_quiz(domain, course_id, title, html_body, token):
         }
     }
     response = requests.post(url, headers=headers, json=payload)
-    if response.status_code in (200, 201):
-        return response.json().get("id")
-    else:
-        st.error(f"❌ Failed to create quiz '{title}': {response.text}")
-        return None
+    return response.json().get("id") if response.status_code in (200, 201) else None
 
 def create_discussion(domain, course_id, title, html_body, token):
     url = f"https://{domain}/api/v1/courses/{course_id}/discussion_topics"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {
-        "title": title,
-        "message": html_body,
-        "published": True
-    }
+    payload = {"title": title, "message": html_body, "published": True}
     response = requests.post(url, headers=headers, json=payload)
-    if response.status_code in (200, 201):
-        return response.json().get("id")
-    else:
-        st.error(f"❌ Failed to create discussion '{title}': {response.text}")
-        return None
+    return response.json().get("id") if response.status_code in (200, 201) else None
 
-def add_to_module(domain, course_id, module_id, page_url, title, token):
-    url = f"https://{domain}/api/v1/courses/{course_id}/modules/{module_id}/items"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {"module_item": {"title": title, "type": "Page", "page_url": page_url, "published": True}}
-    response = requests.post(url, headers=headers, json=payload)
-    return response.status_code in (200, 201)
-
-# --- AI HTML Conversion ---
+# --- Content Parsing ---
 def process_html_content(raw_text):
     content = raw_text
     content = re.sub(r"<accordion>\s*Title:\s*(.*?)\s*Content:\s*(.*?)</accordion>",
@@ -145,8 +134,6 @@ def process_html_content(raw_text):
             result.append("</ul>")
         return '\n'.join(result)
 
-    content = bullet_transform(content)
-
     def quiz_transform(text):
         lines = text.split('\n')
         output = []
@@ -159,7 +146,7 @@ def process_html_content(raw_text):
                     output.append(f"<p><strong>{question}</strong></p><ul>{''.join(choices)}</ul>")
                     choices = []
                 question = line
-            elif re.match(r"^\*?[A-Da-d]\.", line):
+            elif re.match(r"^\*?[A-Da-d]\. ", line):
                 is_correct = line.startswith("*")
                 clean_line = re.sub(r"^\*?([A-Da-d]\. )", '', line).strip()
                 li = f"<li><strong>{line[:2]}</strong> {clean_line}</li>"
@@ -174,9 +161,7 @@ def process_html_content(raw_text):
 
         return '\n'.join(output)
 
-    content = quiz_transform(content)
-
-    return content
+    return quiz_transform(bullet_transform(content))
 
 # --- Text Parsing from DOCX ---
 def extract_canvas_pages(docx_file):
@@ -215,26 +200,20 @@ if uploaded_file and canvas_domain and course_id and token:
 
             if page_type.lower() == "assignment":
                 aid = create_assignment(canvas_domain, course_id, page_title, html_body, token)
-                if aid:
-                    st.success(f"✅ Assignment '{page_title}' created successfully.")
+                if aid and add_item_to_module(canvas_domain, course_id, mid, "Assignment", aid, page_title, token):
+                    st.success(f"✅ Assignment '{page_title}' created and added to '{module_name}'")
 
             elif page_type.lower() == "quiz":
                 qid = create_quiz(canvas_domain, course_id, page_title, html_body, token)
-                if qid:
-                    st.success(f"✅ Quiz '{page_title}' created successfully.")
+                if qid and add_item_to_module(canvas_domain, course_id, mid, "Quiz", qid, page_title, token):
+                    st.success(f"✅ Quiz '{page_title}' created and added to '{module_name}'")
 
             elif page_type.lower() == "discussion":
                 did = create_discussion(canvas_domain, course_id, page_title, html_body, token)
-                if did:
-                    st.success(f"✅ Discussion '{page_title}' created successfully.")
+                if did and add_item_to_module(canvas_domain, course_id, mid, "Discussion", did, page_title, token):
+                    st.success(f"✅ Discussion '{page_title}' created and added to '{module_name}'")
 
             else:
                 page_url = create_page(canvas_domain, course_id, page_title, html_body, token)
-                if not page_url:
-                    continue
-
-                success = add_to_module(canvas_domain, course_id, mid, page_url, page_title, token)
-                if success:
-                    st.success(f"✅ {page_type} '{page_title}' added to module '{module_name}'")
-                else:
-                    st.error(f"Failed to add page '{page_title}' to module '{module_name}'")
+                if page_url and add_item_to_module(canvas_domain, course_id, mid, "Page", page_url, page_title, token):
+                    st.success(f"✅ Page '{page_title}' created and added to '{module_name}'")
