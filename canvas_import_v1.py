@@ -15,11 +15,10 @@ uploaded_file = st.file_uploader("Upload storyboard (.docx)", type="docx")
 
 # --- Custom Component Templates ---
 TEMPLATES = {
-    "accordion": '<details><summary style="cursor: pointer;">{title}<small> (click to reveal) </small></summary><p style="padding-left: 40px;">{body}</p></details>',
-    "callout": '<blockquote><p>{body}</p></blockquote>',
+    "accordion": lambda title, body: f'<details><summary style="cursor: pointer;">{title}<small> (click to reveal) </small></summary><p style="padding-left: 40px;">{body}</p></details>',
+    "callout": lambda body: f'<blockquote><p>{body}</p></blockquote>',
     "bullets": lambda items: '<ul>' + ''.join([f'<li>{item.strip().lstrip("-•")}</li>' for item in items.split("\n") if item.strip()]) + '</ul>'
 }
-
 
 # --- Canvas API Integration ---
 def get_or_create_module(module_name, domain, course_id, token, module_cache):
@@ -45,33 +44,26 @@ def get_or_create_module(module_name, domain, course_id, token, module_cache):
         st.error(f"Failed to create/find module: {module_name}")
         return None
 
-def create_page(domain, course_id, title, html_body, token):
-    url = f"https://{domain}/api/v1/courses/{course_id}/pages"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {"wiki_page": {"title": title, "body": html_body, "published": True}}
-    response = requests.post(url, headers=headers, json=payload)
-    if response.status_code in (200, 201):
-        return response.json().get("url")
-    else:
-        st.error(f"Failed to create page '{title}': {response.text}")
-        return None
+# --- Replace Storyboard Tags with HTML ---
+def convert_storyboard_to_html(text):
+    text = re.sub(r"<h2>(.*?)</h2>", r"<h2>\1</h2>", text)
+    text = re.sub(r"<paragraph>(.*?)</paragraph>", r"<p>\1</p>", text)
+    text = re.sub(r"<line\s*/?>", r"<hr>", text)
 
-def add_to_module(domain, course_id, module_id, page_url, title, token):
-    url = f"https://{domain}/api/v1/courses/{course_id}/modules/{module_id}/items"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {"module_item": {"title": title, "type": "Page", "page_url": page_url, "published": True}}
-    response = requests.post(url, headers=headers, json=payload)
-    return response.status_code in (200, 201)
+    # Handle accordion tags
+    def accordion_repl(match):
+        title = match.group("title").strip()
+        body = match.group("body").strip()
+        return TEMPLATES["accordion"](title, body)
 
-# --- AI HTML Conversion (or Fallback to Regex Template Injection) ---
-def process_html_content(raw_text):
-    content = raw_text
+    text = re.sub(
+        r"<accordion>\s*Title:\s*(?P<title>.*?)\s*Content:\s*(?P<body>.*?)</accordion>",
+        accordion_repl,
+        text,
+        flags=re.DOTALL
+    )
 
-    # Replace <accordion title=...>...</accordion>
-    content = re.sub(r"<accordion title=\"(.*?)\">(.*?)</accordion>",
-                     lambda m: TEMPLATES["accordion"].format(title=m.group(1), body=m.group(2)),
-                     content, flags=re.DOTALL)
-
+    return text
     # Replace <callout>...</callout>
     content = re.sub(r"<callout>(.*?)</callout>",
                      lambda m: TEMPLATES["callout"].format(body=m.group(1)),
