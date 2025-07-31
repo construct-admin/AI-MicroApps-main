@@ -22,60 +22,89 @@ def create_qti_package(quiz_title, questions):
     qti_id = f"quiz_{uuid.uuid4().hex}"
     os.makedirs(qti_id, exist_ok=True)
 
-    # Create assessment.xml
-    assessment = ET.Element("questestinterop")
-    assessment_section = ET.SubElement(assessment, "assessment", attrib={"title": quiz_title})
-    section = ET.SubElement(assessment_section, "section", attrib={"ident": "root_section"})
+    # === assessment.xml ===
+    ET.register_namespace('', "http://www.imsglobal.org/xsd/ims_qtiasiv1p2")
+
+    questestinterop = ET.Element("questestinterop")
+    assessment = ET.SubElement(questestinterop, "assessment", {"title": quiz_title})
+    section = ET.SubElement(assessment, "section", {"ident": "root_section"})
 
     for i, q in enumerate(questions):
-        item = ET.SubElement(section, "item", attrib={"ident": f"q{i+1}", "title": q['text']})
-        presentation = ET.SubElement(item, "presentation")
-        material = ET.SubElement(ET.SubElement(presentation, "material"), "mattext", attrib={"texttype": "text/html"})
-        material.text = q['text']
+        item_id = f"q{i+1}"
+        item = ET.SubElement(section, "item", {"ident": item_id, "title": f"Q{i+1}"})
 
-        response_lid = ET.SubElement(presentation, "response_lid", attrib={"ident": "response1", "rcardinality": "Single"})
+        # Metadata
+        metadata = ET.SubElement(item, "itemmetadata")
+        ET.SubElement(metadata, "qtimetadata")
+        ET.SubElement(ET.SubElement(metadata, "qtimetadatafield"), "fieldlabel").text = "qmd_itemtype"
+        ET.SubElement(ET.SubElement(metadata, "qtimetadatafield"), "fieldentry").text = "Multiple Choice"
+
+        # Question text
+        presentation = ET.SubElement(item, "presentation")
+        material = ET.SubElement(ET.SubElement(presentation, "material"), "mattext", {"texttype": "text/html"})
+        material.text = q["text"]
+
+        # Answers
+        response_lid = ET.SubElement(presentation, "response_lid", {"ident": "response1", "rcardinality": "Single"})
         render_choice = ET.SubElement(response_lid, "render_choice")
 
-        for j, ans in enumerate(q['answers']):
-            resp = ET.SubElement(render_choice, "response_label", attrib={"ident": f"A{j+1}"})
+        feedback_refs = []
+
+        for j, ans in enumerate(q["answers"]):
+            ans_id = f"A{j+1}"
+            resp = ET.SubElement(render_choice, "response_label", {"ident": ans_id})
             mat = ET.SubElement(ET.SubElement(resp, "material"), "mattext")
-            mat.text = ans['text']
-
-        resprocessing = ET.SubElement(item, "resprocessing")
-        outcomes = ET.SubElement(resprocessing, "outcomes")
-        ET.SubElement(outcomes, "decvar", attrib={"vartype": "Decimal", "defaultval": "0"})
-
-        for j, ans in enumerate(q['answers']):
-            respcondition = ET.SubElement(resprocessing, "respcondition", attrib={"continue": "Yes"})
-            conditionvar = ET.SubElement(respcondition, "conditionvar")
-            ET.SubElement(conditionvar, "varequal", attrib={"respident": "response1"}).text = f"A{j+1}"
-            setvar = ET.SubElement(respcondition, "setvar", attrib={"action": "Set"})
-            setvar.text = "1" if ans['correct'] else "0"
-
+            mat.text = ans["text"]
             if ans.get("feedback"):
-                feedback = ET.SubElement(item, "itemfeedback", attrib={"ident": f"feedback{j+1}"})
-                ET.SubElement(ET.SubElement(feedback, "material"), "mattext").text = ans["feedback"]
+                fb_id = f"feedback_{item_id}_{ans_id}"
+                feedback_refs.append((ans_id, fb_id, ans["feedback"]))
 
-    tree = ET.ElementTree(assessment)
-    tree.write(f"{qti_id}/assessment.xml", encoding="utf-8", xml_declaration=True)
+        # Scoring logic
+        resprocessing = ET.SubElement(item, "resprocessing")
+        ET.SubElement(ET.SubElement(resprocessing, "outcomes"), "decvar", {"varname": "SCORE", "vartype": "Decimal", "defaultval": "0"})
 
-    # Create imsmanifest.xml
-    manifest = ET.Element("manifest", attrib={"identifier": qti_id, "xmlns": "http://www.imsglobal.org/xsd/imscp_v1p1"})
+        for j, ans in enumerate(q["answers"]):
+            ans_id = f"A{j+1}"
+            rc = ET.SubElement(resprocessing, "respcondition", {"continue": "Yes"})
+            cond = ET.SubElement(rc, "conditionvar")
+            ET.SubElement(cond, "varequal", {"respident": "response1"}).text = ans_id
+            setvar = ET.SubElement(rc, "setvar", {"action": "Set"})
+            setvar.text = "1" if ans["correct"] else "0"
+
+            # Link to feedback
+            for ref_ans, fb_id, fb_text in feedback_refs:
+                if ref_ans == ans_id:
+                    displayfeedback = ET.SubElement(rc, "displayfeedback", {"feedbacktype": "Response", "linkrefid": fb_id})
+
+        # Feedback elements
+        for _, fb_id, fb_text in feedback_refs:
+            fb = ET.SubElement(item, "itemfeedback", {"ident": fb_id})
+            mat = ET.SubElement(ET.SubElement(fb, "material"), "mattext")
+            mat.text = fb_text
+
+    # Write XML
+    assessment_xml = os.path.join(qti_id, "assessment.xml")
+    ET.ElementTree(questestinterop).write(assessment_xml, encoding="utf-8", xml_declaration=True)
+
+    # === imsmanifest.xml ===
+    manifest = ET.Element("manifest", {"identifier": qti_id, "xmlns": "http://www.imsglobal.org/xsd/imscp_v1p1"})
     resources = ET.SubElement(manifest, "resources")
-    ET.SubElement(resources, "resource", attrib={
+    ET.SubElement(resources, "resource", {
         "identifier": "res1",
         "type": "imsqti_xmlv1p1",
         "href": "assessment.xml"
     })
-    tree = ET.ElementTree(manifest)
-    tree.write(f"{qti_id}/imsmanifest.xml", encoding="utf-8", xml_declaration=True)
+    imsmanifest_xml = os.path.join(qti_id, "imsmanifest.xml")
+    ET.ElementTree(manifest).write(imsmanifest_xml, encoding="utf-8", xml_declaration=True)
 
-    # Zip it
+    # === Zip QTI Package ===
     zip_path = f"{qti_id}.zip"
     with zipfile.ZipFile(zip_path, "w") as zipf:
-        zipf.write(f"{qti_id}/assessment.xml", arcname="assessment.xml")
-        zipf.write(f"{qti_id}/imsmanifest.xml", arcname="imsmanifest.xml")
+        zipf.write(assessment_xml, arcname="assessment.xml")
+        zipf.write(imsmanifest_xml, arcname="imsmanifest.xml")
+
     return zip_path
+
 
 # --- Upload QTI to Canvas ---
 def upload_qti_to_canvas(canvas_domain, course_id, token, zip_path):
