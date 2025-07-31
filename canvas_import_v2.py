@@ -55,6 +55,7 @@ Replace the following tags with valid HTML (using inline CSS):
 - <question><multiple choice> → Leave these blocks in-place for structured Canvas parsing
 - if there are no <...> tags, do not add in tags or restructure, just convert to HTML.
 - tags can be in formatted text, if they are, ignore the formatting and apply the tag as you would normally.
+- tags in <h1> are usually page headings
 
 Keep paragraphs and indentation intact.
 
