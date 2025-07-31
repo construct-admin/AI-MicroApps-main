@@ -13,12 +13,43 @@ token = st.text_input("Canvas API Token", type="password")
 
 uploaded_file = st.file_uploader("Upload storyboard (.docx)", type="docx")
 
+<<<<<<< HEAD
 # --- Custom Component Templates ---
 TEMPLATES = {
     "accordion": '<div style="background-color:#0077b6;color:#fff;padding:10px;border-radius:5px;margin-bottom:10px;"><strong>{title}</strong><div style="margin-top:5px">{body}</div></div>',
     "callout": '<div style="border-left:5px solid #2196F3;background:#f1f9ff;padding:10px 15px;margin:10px 0;">{body}</div>',
     "bullets": lambda items: '<ul>' + ''.join([f'<li>{item.strip()}</li>' for item in items.split("\n") if item.strip()]) + '</ul>'
 }
+=======
+# --- AI HTML Conversion ---
+def generate_html_with_ai(module, title, content):
+    prompt = f"""Convert the following content into styled HTML for a Canvas page.
+Module: {module}
+Page Title: {title}
+Content:
+{content}"""
+
+    headers = {
+        "Authorization": f"Bearer {st.secrets['OPENAI_API_KEY']}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": "gpt-4o",
+        "messages": [
+            {"role": "system", "content": "Convert raw content into styled Canvas-compatible HTML."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.3
+    }
+
+    response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
+    if response.status_code == 200:
+        return response.json()["choices"][0]["message"]["content"].strip("`")
+    else:
+        st.error(f"OpenAI API error: {response.status_code} - {response.text}")
+        return None
+>>>>>>> d7d93a9a1b66ff47560d03cd8aa190236ddcbc5c
 
 # --- Canvas API Integration ---
 def get_or_create_module(module_name, domain, course_id, token, module_cache):
@@ -35,6 +66,10 @@ def get_or_create_module(module_name, domain, course_id, token, module_cache):
                 module_cache[module_name] = m["id"]
                 return m["id"]
 
+<<<<<<< HEAD
+=======
+    # If not found, create new module
+>>>>>>> d7d93a9a1b66ff47560d03cd8aa190236ddcbc5c
     resp = requests.post(url, headers=headers, json={"module": {"name": module_name, "published": True}})
     if resp.status_code in (200, 201):
         mid = resp.json().get("id")
@@ -62,6 +97,7 @@ def add_to_module(domain, course_id, module_id, page_url, title, token):
     response = requests.post(url, headers=headers, json=payload)
     return response.status_code in (200, 201)
 
+<<<<<<< HEAD
 # --- AI HTML Conversion (or Fallback to Regex Template Injection) ---
 def process_html_content(raw_text):
     content = raw_text
@@ -127,3 +163,50 @@ if uploaded_file and canvas_domain and course_id and token:
                 st.success(f"✅ {page_type} '{page_title}' added to module '{module_name}'")
             else:
                 st.error(f"Failed to add page '{page_title}' to module '{module_name}'")
+=======
+# --- Text Parsing from DOCX ---
+def extract_canvas_pages(docx_file):
+    doc = Document(docx_file)
+    full_text = '\n'.join([para.text for para in doc.paragraphs])
+    return re.findall(r"<canvas_page>(.*?)</canvas_page>", full_text, re.DOTALL)
+
+def parse_page_block(block_text):
+    def extract_tag(tag):
+        match = re.search(fr"<{tag}>(.*?)</{tag}>", block_text)
+        return match.group(1).strip() if match else ""
+
+    page_type = extract_tag("page_type") or "Pages"
+    page_name = extract_tag("page_name") or "Untitled Page"
+    module_name = extract_tag("module_name") or "General"
+    clean_text = re.sub(r"<(page_type|page_name|module_name)>.*?</\1>", "", block_text, flags=re.DOTALL).strip()
+    return page_type, page_name, module_name, clean_text
+
+# --- Main Logic ---
+if uploaded_file and canvas_domain and course_id and token:
+    pages = extract_canvas_pages(uploaded_file)
+    module_cache = {}
+
+    st.subheader("Detected Pages")
+    for i, block in enumerate(pages):
+        page_type, page_title, module_name, raw = parse_page_block(block)
+        ai_html = generate_html_with_ai(module_name, page_title, raw)
+
+        if ai_html:
+            st.markdown(f"### {i+1}. {page_title} ({page_type}) in {module_name}")
+            st.code(ai_html, language="html")
+
+            if st.button(f"Send '{page_title}' to Canvas", key=i):
+                mid = get_or_create_module(module_name, canvas_domain, course_id, token, module_cache)
+                if not mid:
+                    continue
+
+                page_url = create_page(canvas_domain, course_id, page_title, ai_html, token)
+                if not page_url:
+                    continue
+
+                success = add_to_module(canvas_domain, course_id, mid, page_url, page_title, token)
+                if success:
+                    st.success(f"✅ {page_type} '{page_title}' added to module '{module_name}'")
+                else:
+                    st.error(f"Failed to add page '{page_title}' to module '{module_name}'")
+>>>>>>> d7d93a9a1b66ff47560d03cd8aa190236ddcbc5c
