@@ -15,7 +15,7 @@ uploaded_file = st.file_uploader("Upload storyboard (.docx)", type="docx")
 
 # --- Custom Component Templates ---
 TEMPLATES = {
-    "accordion": '<details style="margin:10px 0; background:#0077b6; color:#fff; border-radius:5px; padding:10px;"><summary style="cursor:pointer; font-weight:bold;">{title}</summary><div style="margin-top:10px; background:#f1f1f1; color:#333; padding:10px; border-radius:5px;">{body}</div></details>',
+    "accordion": '<details><summary style="cursor: pointer; font-weight: bold;">{title} <small>(click to reveal)</small></summary><div style="padding-left: 20px; margin-top: 10px;">{body}</div></details>',
     "callout": '<blockquote><p>{body}</p></blockquote>',
     "bullets": lambda items: '<ul>' + ''.join([f'<li>{item.strip().lstrip("-•").strip()}</li>' for item in items.split("\n") if item.strip()]) + '</ul>'
 }
@@ -55,13 +55,6 @@ def create_page(domain, course_id, title, html_body, token):
         st.error(f"Failed to create page '{title}': {response.text}")
         return None
 
-def add_to_module(domain, course_id, module_id, page_url, title, token):
-    url = f"https://{domain}/api/v1/courses/{course_id}/modules/{module_id}/items"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {"module_item": {"title": title, "type": "Page", "page_url": page_url, "published": True}}
-    response = requests.post(url, headers=headers, json=payload)
-    return response.status_code in (200, 201)
-
 def create_assignment(domain, course_id, title, html_body, token):
     url = f"https://{domain}/api/v1/courses/{course_id}/assignments"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -70,7 +63,7 @@ def create_assignment(domain, course_id, title, html_body, token):
             "name": title,
             "description": html_body,
             "published": True,
-            "submission_types": ["online_text_entry"],  # Default for now
+            "submission_types": ["online_text_entry"],
             "points_possible": 10
         }
     }
@@ -81,12 +74,17 @@ def create_assignment(domain, course_id, title, html_body, token):
         st.error(f"❌ Failed to create assignment '{title}': {response.text}")
         return None
 
+def add_to_module(domain, course_id, module_id, page_url, title, token):
+    url = f"https://{domain}/api/v1/courses/{course_id}/modules/{module_id}/items"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {"module_item": {"title": title, "type": "Page", "page_url": page_url, "published": True}}
+    response = requests.post(url, headers=headers, json=payload)
+    return response.status_code in (200, 201)
 
 # --- AI HTML Conversion (or Fallback to Regex Template Injection) ---
 def process_html_content(raw_text):
     content = raw_text
 
-    # Replace <accordion> with Title/Content format
     content = re.sub(
         r"<accordion>\s*Title:\s*(.*?)\s*Content:\s*(.*?)</accordion>",
         lambda m: TEMPLATES["accordion"].format(title=m.group(1).strip(), body=m.group(2).strip()),
@@ -95,12 +93,10 @@ def process_html_content(raw_text):
     )
 
 
-    # Replace <callout>...</callout>
     content = re.sub(r"<callout>(.*?)</callout>",
                      lambda m: TEMPLATES["callout"].format(body=m.group(1)),
                      content, flags=re.DOTALL)
 
-    # Replace <bullets>...</bullets>
     content = re.sub(r"<bullets>(.*?)</bullets>",
                      lambda m: TEMPLATES["bullets"](m.group(1)),
                      content, flags=re.DOTALL)
@@ -142,19 +138,17 @@ if uploaded_file and canvas_domain and course_id and token:
             if not mid:
                 continue
 
-        if page_type.lower() == "assignment":
-            assignment_id = create_assignment(canvas_domain, course_id, page_title, html_body, token)
-            if not assignment_id:
-                continue
-            st.success(f"✅ Assignment '{page_title}' created successfully.")
-        else:
-            page_url = create_page(canvas_domain, course_id, page_title, html_body, token)
-            if not page_url:
-                continue
-
-            success = add_to_module(canvas_domain, course_id, mid, page_url, page_title, token)
-            if success:
-                st.success(f"✅ {page_type} '{page_title}' added to module '{module_name}'")
+            if page_type.lower() == "assignment":
+                assignment_id = create_assignment(canvas_domain, course_id, page_title, html_body, token)
+                if assignment_id:
+                    st.success(f"✅ Assignment '{page_title}' created successfully.")
             else:
-                st.error(f"Failed to add page '{page_title}' to module '{module_name}'")
+                page_url = create_page(canvas_domain, course_id, page_title, html_body, token)
+                if not page_url:
+                    continue
 
+                success = add_to_module(canvas_domain, course_id, mid, page_url, page_title, token)
+                if success:
+                    st.success(f"✅ {page_type} '{page_title}' added to module '{module_name}'")
+                else:
+                    st.error(f"Failed to add page '{page_title}' to module '{module_name}'")
