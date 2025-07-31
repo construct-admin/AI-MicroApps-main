@@ -2,195 +2,85 @@ import streamlit as st
 import requests
 import re
 from docx import Document
-import openai
 from bs4 import BeautifulSoup
+import os
+import zipfile
+import uuid
+import xml.etree.ElementTree as ET
 
 # --- UI Setup ---
 st.set_page_config(page_title="Canvas Storyboard Importer with AI", layout="centered")
-st.title("🧩 Canvas Storyboard Importer with AI HTML Generator")
+st.title("🧩 Canvas Storyboard Importer + New Quiz QTI Export")
 
 canvas_domain = st.text_input("Canvas Base URL (e.g. canvas.instructure.com)")
 course_id = st.text_input("Canvas Course ID")
 token = st.text_input("Canvas API Token", type="password")
-
 uploaded_file = st.file_uploader("Upload storyboard (.docx)", type="docx")
 
-# --- Custom Component Templates ---
-TEMPLATES = {
-    "accordion": '<details><summary style="cursor: pointer; font-weight: bold; background-color:#0077b6; color:white; padding:10px; border-radius:5px;">{title} <small>(click to reveal)</small></summary><div style="padding:10px 20px; margin-top: 10px; background-color:#f2f2f2; color:#333;">{body}</div></details>',
-    "callout": '<blockquote><p>{body}</p></blockquote>'
-}
+# --- QTI Helper ---
+def create_qti_package(quiz_title, questions):
+    qti_id = f"quiz_{uuid.uuid4().hex}"
+    os.makedirs(qti_id, exist_ok=True)
 
-# --- Fallback Bullet Conversion ---
-def convert_bullets(text):
-    lines = text.split("\n")
-    out = []
-    in_list = False
-    for line in lines:
-        if line.strip().startswith("-"):
-            if not in_list:
-                out.append("<ul>")
-                in_list = True
-            out.append(f"<li>{line.strip()[1:].strip()}</li>")
-        else:
-            if in_list:
-                out.append("</ul>")
-                in_list = False
-            out.append(line)
-    if in_list:
-        out.append("</ul>")
-    return '\n'.join(out)
+    # Create assessment.xml
+    assessment = ET.Element("questestinterop")
+    assessment_section = ET.SubElement(assessment, "assessment", attrib={"title": quiz_title})
+    section = ET.SubElement(assessment_section, "section", attrib={"ident": "root_section"})
 
-# --- OpenAI HTML Conversion ---
-def convert_to_html_with_openai(docx_text, fallback_html):
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    for i, q in enumerate(questions):
+        item = ET.SubElement(section, "item", attrib={"ident": f"q{i+1}", "title": q['text']})
+        presentation = ET.SubElement(item, "presentation")
+        material = ET.SubElement(ET.SubElement(presentation, "material"), "mattext", attrib={"texttype": "text/html"})
+        material.text = q['text']
 
-        prompt = f"""Convert the following storyboard content to HTML. Preserve formatting like headings (<h1>, <h2>), bold (<strong>), italics (<em>), and lists. 
-Replace the following tags with valid HTML (using inline CSS):
-- <accordion> → <details><summary style="cursor: pointer; font-weight: bold; background-color:#0077b6; color:white; padding:10px; border-radius:5px;">Title <small>(click to reveal)</small></summary><div style="padding:10px 20px; margin-top: 10px; background-color:#f2f2f2; color:#333;">Content</div></details>
-- <callout> → <blockquote><p>...</p></blockquote>
-- Bullet points starting with '-' → <ul><li>...</li></ul>
-- <question><multiple choice> → Leave these blocks in-place for structured Canvas parsing
+        response_lid = ET.SubElement(presentation, "response_lid", attrib={"ident": "response1", "rcardinality": "Single"})
+        render_choice = ET.SubElement(response_lid, "render_choice")
 
-Keep paragraphs and indentation intact.
+        for j, ans in enumerate(q['answers']):
+            resp = ET.SubElement(render_choice, "response_label", attrib={"ident": f"A{j+1}"})
+            mat = ET.SubElement(ET.SubElement(resp, "material"), "mattext")
+            mat.text = ans['text']
 
-Storyboard Content:
-{docx_text}
+        resprocessing = ET.SubElement(item, "resprocessing")
+        outcomes = ET.SubElement(resprocessing, "outcomes")
+        ET.SubElement(outcomes, "decvar", attrib={"vartype": "Decimal", "defaultval": "0"})
 
-Output only valid HTML. No explanation or preamble."""
-        
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        st.warning(f"⚠️ OpenAI processing failed, using fallback: {e}")
-        return fallback_html
+        for j, ans in enumerate(q['answers']):
+            respcondition = ET.SubElement(resprocessing, "respcondition", attrib={"continue": "Yes"})
+            conditionvar = ET.SubElement(respcondition, "conditionvar")
+            ET.SubElement(conditionvar, "varequal", attrib={"respident": "response1"}).text = f"A{j+1}"
+            setvar = ET.SubElement(respcondition, "setvar", attrib={"action": "Set"})
+            setvar.text = "1" if ans['correct'] else "0"
 
-# --- Canvas API Integration ---
-def get_or_create_module(module_name, domain, course_id, token, module_cache):
-    if module_name in module_cache:
-        return module_cache[module_name]
-    url = f"https://{domain}/api/v1/courses/{course_id}/modules"
-    headers = {"Authorization": f"Bearer {token}"}
-    resp = requests.get(url, headers=headers)
-    if resp.status_code == 200:
-        for m in resp.json():
-            if m["name"].strip().lower() == module_name.strip().lower():
-                module_cache[module_name] = m["id"]
-                return m["id"]
-    resp = requests.post(url, headers=headers, json={"module": {"name": module_name, "published": True}})
-    if resp.status_code in (200, 201):
-        mid = resp.json().get("id")
-        module_cache[module_name] = mid
-        return mid
-    else:
-        st.error(f"Failed to create/find module: {module_name}")
-        return None
+            if ans.get("feedback"):
+                feedback = ET.SubElement(item, "itemfeedback", attrib={"ident": f"feedback{j+1}"})
+                ET.SubElement(ET.SubElement(feedback, "material"), "mattext").text = ans["feedback"]
 
-def create_page(domain, course_id, title, html_body, token):
-    url = f"https://{domain}/api/v1/courses/{course_id}/pages"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {"wiki_page": {"title": title, "body": html_body, "published": True}}
-    response = requests.post(url, headers=headers, json=payload)
-    return response.json().get("url") if response.status_code in (200, 201) else None
+    tree = ET.ElementTree(assessment)
+    tree.write(f"{qti_id}/assessment.xml", encoding="utf-8", xml_declaration=True)
 
-def create_assignment(domain, course_id, title, html_body, token):
-    url = f"https://{domain}/api/v1/courses/{course_id}/assignments"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {
-        "assignment": {
-            "name": title,
-            "description": html_body,
-            "published": True,
-            "submission_types": ["online_text_entry"],
-            "points_possible": 10
-        }
-    }
-    response = requests.post(url, headers=headers, json=payload)
-    return response.json().get("id") if response.status_code in (200, 201) else None
+    # Create imsmanifest.xml
+    manifest = ET.Element("manifest", attrib={"identifier": qti_id, "xmlns": "http://www.imsglobal.org/xsd/imscp_v1p1"})
+    resources = ET.SubElement(manifest, "resources")
+    ET.SubElement(resources, "resource", attrib={
+        "identifier": "res1",
+        "type": "imsqti_xmlv1p1",
+        "href": "assessment.xml"
+    })
+    tree = ET.ElementTree(manifest)
+    tree.write(f"{qti_id}/imsmanifest.xml", encoding="utf-8", xml_declaration=True)
 
-def create_discussion(domain, course_id, title, html_body, token):
-    url = f"https://{domain}/api/v1/courses/{course_id}/discussion_topics"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {"title": title, "message": html_body, "published": True}
-    response = requests.post(url, headers=headers, json=payload)
-    return response.json().get("id") if response.status_code in (200, 201) else None
+    # Zip it
+    zip_path = f"{qti_id}.zip"
+    with zipfile.ZipFile(zip_path, "w") as zipf:
+        zipf.write(f"{qti_id}/assessment.xml", arcname="assessment.xml")
+        zipf.write(f"{qti_id}/imsmanifest.xml", arcname="imsmanifest.xml")
+    return zip_path
 
-def create_quiz(domain, course_id, title, html_body, token, questions):
-    url = f"https://{domain}/api/v1/courses/{course_id}/quizzes"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {
-        "quiz": {
-            "title": title,
-            "description": html_body,
-            "published": True,
-            "quiz_type": "assignment",
-            "scoring_policy": "keep_highest"
-        }
-    }
-    response = requests.post(url, headers=headers, json=payload)
-    if response.status_code not in (200, 201):
-        st.error(f"Failed to create quiz '{title}': {response.text}")
-        return None
-
-    quiz_id = response.json().get("id")
-    for q in questions:
-        question_type = "multiple_choice_question" if q['type'] == "multiple choice" else "essay_question"
-        question_payload = {
-            "question": {
-                "question_name": "Q",
-                "question_text": q['text'],
-                "question_type": question_type,
-                "points_possible": 1,
-                "answers": [
-                    {"text": a['text'], "weight": 100 if a['correct'] else 0} for a in q.get('answers', [])
-                ] if question_type == "multiple_choice_question" else []
-            }
-        }
-        q_url = f"https://{domain}/api/v1/courses/{course_id}/quizzes/{quiz_id}/questions"
-        requests.post(q_url, headers=headers, json=question_payload)
-    return quiz_id
-
-def add_to_module(domain, course_id, module_id, item_type, item_ref, title, token):
-    url = f"https://{domain}/api/v1/courses/{course_id}/modules/{module_id}/items"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {"module_item": {"title": title, "type": item_type, "published": True}}
-    if item_type == "Page":
-        payload["module_item"]["page_url"] = item_ref
-    else:
-        payload["module_item"]["content_id"] = item_ref
-
-    response = requests.post(url, headers=headers, json=payload)
-    return response.status_code in (200, 201)
-
-# --- Quiz Question Parser ---
-def parse_quiz_questions(raw):
-    questions = []
-    blocks = re.findall(r"<question><(.*?)>\s*(.*?)</question>", raw, re.DOTALL)
-    for qtype, qbody in blocks:
-        lines = qbody.strip().split("\n")
-        qtext = ""
-        answers = []
-        for line in lines:
-            if not qtext:
-                qtext = line.strip()
-            elif re.match(r"\*?[A-E][.:]", line.strip()):
-                correct = line.strip().startswith("*")
-                text = re.sub(r"^\*?([A-E][.:])", r"\1", line.strip()).strip()
-                answers.append({"text": text, "correct": correct})
-        if qtext:
-            questions.append({"type": qtype.strip().lower(), "text": qtext, "answers": answers})
-    return questions
-
-# --- Text Parsing ---
+# --- Parser ---
 def extract_canvas_pages(docx_file):
     doc = Document(docx_file)
-    full_text = '\n'.join([para.text for para in doc.paragraphs])
+    full_text = "\n".join([p.text for p in doc.paragraphs])
     return re.findall(r"<canvas_page>(.*?)</canvas_page>", full_text, re.DOTALL)
 
 def parse_page_block(block_text):
@@ -200,56 +90,48 @@ def parse_page_block(block_text):
     page_type = extract_tag("page_type").lower()
     page_name = extract_tag("page_name")
     module_name = extract_tag("module_name") or "General"
-    content = re.sub(r"<(page_type|page_name|module_name)>.*?</\1>", "", block_text, flags=re.DOTALL).strip()
+    content = re.sub(r"<(page_type|page_name|module_name)>.*?</\\1>", "", block_text, flags=re.DOTALL).strip()
     return page_type, page_name, module_name, content
 
-# --- HTML Processing ---
-def process_html_content(raw_text):
-    fallback_html = raw_text
-    fallback_html = re.sub(r"<accordion>\s*Title:\s*(.*?)\s*Content:\s*(.*?)</accordion>",
-                           lambda m: TEMPLATES["accordion"].format(title=m.group(1).strip(), body=m.group(2).strip()),
-                           fallback_html, flags=re.DOTALL)
-    fallback_html = re.sub(r"<callout>(.*?)</callout>",
-                           lambda m: TEMPLATES["callout"].format(body=m.group(1)),
-                           fallback_html, flags=re.DOTALL)
-    fallback_html = convert_bullets(fallback_html)
-    return convert_to_html_with_openai(raw_text, fallback_html)
+def parse_new_quiz_questions(raw):
+    questions = []
+    blocks = re.findall(r"<question><multiple choice>(.*?)</question>", raw, re.DOTALL)
+    for qblock in blocks:
+        lines = [line.strip() for line in qblock.strip().splitlines() if line.strip()]
+        question_text = lines[0]
+        answers = []
+        for line in lines[1:]:
+            correct = line.startswith("*")
+            feedback_match = re.search(r"<answer feedback=\"(.*?)\">(.+?)</answer>", line)
+            if feedback_match:
+                feedback, ans = feedback_match.groups()
+            else:
+                feedback = ""
+                ans = re.sub(r"^\*?[A-E][.:]\s*", "", line).strip()
+            answers.append({"text": ans, "correct": correct, "feedback": feedback})
+        questions.append({"text": question_text, "answers": answers})
+    return questions
 
 # --- Main Logic ---
-if uploaded_file and canvas_domain and course_id and token:
+if uploaded_file:
     pages = extract_canvas_pages(uploaded_file)
-    module_cache = {}
+    all_new_quiz_questions = []
+    found_new_quiz = False
 
     st.subheader("Detected Pages")
     for i, block in enumerate(pages):
         page_type, page_title, module_name, raw = parse_page_block(block)
-        html_body = process_html_content(raw)
-
         st.markdown(f"### {i+1}. {page_title} ({page_type}) in {module_name}")
-        st.code(html_body, language="html")
 
-        if st.button(f"Send '{page_title}' to Canvas", key=i):
-            mid = get_or_create_module(module_name, canvas_domain, course_id, token, module_cache)
-            if not mid:
-                continue
+        if page_type == "new_quiz":
+            found_new_quiz = True
+            questions = parse_new_quiz_questions(raw)
+            all_new_quiz_questions.extend(questions)
+            st.success(f"📝 Detected {len(questions)} New Quiz questions.")
+        else:
+            st.code(raw)
 
-            if page_type == "assignment":
-                aid = create_assignment(canvas_domain, course_id, page_title, html_body, token)
-                if aid and add_to_module(canvas_domain, course_id, mid, "Assignment", aid, page_title, token):
-                    st.success(f"✅ Assignment '{page_title}' created and added to '{module_name}'")
-
-            elif page_type == "quiz":
-                quiz_questions = parse_quiz_questions(raw)
-                qid = create_quiz(canvas_domain, course_id, page_title, html_body, token, quiz_questions)
-                if qid and add_to_module(canvas_domain, course_id, mid, "Quiz", qid, page_title, token):
-                    st.success(f"✅ Quiz '{page_title}' created and added to '{module_name}'")
-
-            elif page_type == "discussion":
-                did = create_discussion(canvas_domain, course_id, page_title, html_body, token)
-                if did and add_to_module(canvas_domain, course_id, mid, "Discussion", did, page_title, token):
-                    st.success(f"✅ Discussion '{page_title}' created and added to '{module_name}'")
-
-            else:
-                page_url = create_page(canvas_domain, course_id, page_title, html_body, token)
-                if page_url and add_to_module(canvas_domain, course_id, mid, "Page", page_url, page_title, token):
-                    st.success(f"✅ Page '{page_title}' created and added to '{module_name}'")
+    if found_new_quiz and st.button("📦 Generate QTI for New Quizzes"):
+        zip_path = create_qti_package("New Quiz from Storyboard", all_new_quiz_questions)
+        with open(zip_path, "rb") as f:
+            st.download_button("⬇️ Download QTI Package", f, file_name=os.path.basename(zip_path))
