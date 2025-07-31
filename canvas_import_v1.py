@@ -172,15 +172,19 @@ def parse_quiz_questions(raw):
         qtext = ""
         answers = []
         for line in lines:
+            clean_line = line.strip()
             if not qtext:
-                qtext = line.strip()
-            elif re.match(r"\*?[A-D]\.", line.strip()):
-                correct = line.strip().startswith("*")
-                text = re.sub(r"^\*?([A-D]\.)", r"\1", line.strip()).strip()
+                # Remove any tag-like info from the first line
+                clean_line = re.sub(r"<.*?>", "", clean_line).strip()
+                qtext = clean_line
+            elif re.match(r"\*?[A-Z]\.", clean_line):
+                correct = clean_line.startswith("*")
+                text = re.sub(r"^\*?([A-Z]\.)", r"\1", clean_line).strip()
                 answers.append({"text": text, "correct": correct})
         if qtext:
             questions.append({"text": qtext, "answers": answers})
     return questions
+
 
 # --- Main Logic ---
 if uploaded_file and canvas_domain and course_id and token:
