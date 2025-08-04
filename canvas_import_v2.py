@@ -41,11 +41,17 @@ def extract_canvas_pages(docx_file):
     for para in doc.paragraphs:
         text = para.text.strip()
         style = para.style.name.lower() if para.style else ""
-        if "horizontal" in style or para._element.xpath('.//w:hr'):
+
+        # Debug output
+        st.text(f"Style: {style} | Text: {text}")
+
+        has_hr = "horizontal" in style or para._element.xpath('.//w:pBdr') or para._element.xpath('.//w:hr')
+        if has_hr:
             if current["title"]:
                 pages.append(current.copy())
                 current = {"module": current["module"], "title": "", "type": "page", "content": ""}
             continue
+
         if "[module]" in text.lower():
             current["module"] = text.replace("[module]", "").strip()
         elif "[lesson]" in text.lower():
@@ -127,6 +133,10 @@ def add_to_module(domain, course_id, module_id, item_type, item_ref, title, toke
 if uploaded_file and canvas_domain and course_id and token:
     pages = extract_canvas_pages(uploaded_file)
     module_cache = {}
+
+    if not pages:
+        st.warning("⚠️ No Canvas pages detected in this document. Check for [lesson], [module], and horizontal lines.")
+
     st.subheader("Detected Pages")
     for i, block in enumerate(pages):
         page_type = block["type"]
