@@ -49,7 +49,7 @@ def convert_to_html_with_openai(docx_text, fallback_html):
 
         prompt = f"""Convert the following storyboard content to HTML. Preserve formatting like headings (<h1>, <h2>), bold (<strong>), italics (<em>), and lists. 
 Replace the following tags with valid HTML (using inline CSS):
-- <accordion> → <details><summary style="cursor: pointer; font-weight: bold; background-color:#0077b6; color:white; padding:10px; border-radius:5px;">Title <small>(click to reveal)</small></summary><div style="padding:10px 20px; margin-top: 10px; background-color:#f2f2f2; color:#333;">Content</div></details>
+- <accordion> → <details><summary style=\"cursor: pointer; font-weight: bold; background-color:#0077b6; color:white; padding:10px; border-radius:5px;\">Title <small>(click to reveal)</small></summary><div style=\"padding:10px 20px; margin-top: 10px; background-color:#f2f2f2; color:#333;\">Content</div></details>
 - <callout> → <blockquote><p>...</p></blockquote>
 - Bullet points starting with '-' → <ul><li>...</li></ul>
 - <question><multiple choice> → Leave these blocks in-place for structured Canvas parsing
@@ -64,7 +64,7 @@ Storyboard Content:
 {docx_text}
 
 Output only valid HTML. No explanation or preamble."""
-        
+
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": prompt}],
@@ -74,6 +74,25 @@ Output only valid HTML. No explanation or preamble."""
     except Exception as e:
         st.warning(f"⚠️ OpenAI processing failed, using fallback: {e}")
         return fallback_html
+
+# --- Quiz Question Parser ---
+def parse_quiz_questions(raw):
+    questions = []
+    blocks = re.findall(r"<question><(.*?)>\s*(.*?)</question>", raw, re.DOTALL)
+    for qtype, qbody in blocks:
+        lines = qbody.strip().split("\n")
+        qtext = ""
+        answers = []
+        for line in lines:
+            if not qtext:
+                qtext = line.strip()
+            elif re.match(r"\*?[A-E][.:]", line.strip()):
+                correct = line.strip().startswith("*")
+                text = re.sub(r"^\*?([A-E][.:])", r"\1", line.strip()).strip()
+                answers.append({"text": text, "correct": correct})
+        if qtext:
+            questions.append({"type": qtype.strip().lower(), "text": qtext, "answers": answers})
+    return questions
 
 # --- Canvas API Integration ---
 def get_or_create_module(module_name, domain, course_id, token, module_cache):
@@ -172,86 +191,6 @@ def add_to_module(domain, course_id, module_id, item_type, item_ref, title, toke
     response = requests.post(url, headers=headers, json=payload)
     return response.status_code in (200, 201)
 
-# --- Quiz Question Parser ---
-def parse_quiz_questions(raw):
-    questions = []
-    blocks = re.findall(r"<question><(.*?)>\s*(.*?)</question>", raw, re.DOTALL)
-    for qtype, qbody in blocks:
-        lines = qbody.strip().split("\n")
-        qtext = ""
-        answers = []
-        for line in lines:
-            if not qtext:
-                qtext = line.strip()
-            elif re.match(r"\*?[A-E][.:]", line.strip()):
-                correct = line.strip().startswith("*")
-                text = re.sub(r"^\*?([A-E][.:])", r"\1", line.strip()).strip()
-                answers.append({"text": text, "correct": correct})
-        if qtext:
-            questions.append({"type": qtype.strip().lower(), "text": qtext, "answers": answers})
-    return questions
-
-# --- Text Parsing ---
-def extract_canvas_pages(docx_file):
-    doc = Document(docx_file)
-    pages = []
-    current = {"module": "General", "title": "", "type": "page", "content": ""}
-
-    for para in doc.paragraphs:
-        text = para.text.strip()
-        style = para.style.name.lower() if para.style else ""
-
-        # End of page: horizontal line or manual divider
-        if "horizontal line" in style or "---" in text:
-            if current["title"]:
-                pages.append(current.copy())
-                current = {"module": current["module"], "title": "", "type": "page", "content": ""}
-            continue
-
-        # Detect tags in headings
-        if "[module]" in text.lower():
-            current["module"] = text.replace("[module]", "").strip()
-        elif "[lesson]" in text.lower():
-            if current["title"]:
-                pages.append(current.copy())
-                current = {"module": current["module"], "title": "", "type": "page", "content": ""}
-            current["title"] = text.replace("[lesson]", "").strip()
-        elif "[assignment]" in text.lower():
-            current["type"] = "assignment"
-        elif "[quiz]" in text.lower():
-            current["type"] = "quiz"
-        elif "[discussion]" in text.lower():
-            current["type"] = "discussion"
-        else:
-            current["content"] += text + "\n"
-
-    if current["title"]:
-        pages.append(current.copy())
-
-    return pages
-
-def parse_page_block(block_text):
-    def extract_tag(tag):
-        match = re.search(fr"<{tag}>(.*?)</{tag}>", block_text)
-        return match.group(1).strip() if match else ""
-    page_type = extract_tag("page_type").lower()
-    page_name = extract_tag("page_name")
-    module_name = extract_tag("module_name") or "General"
-    content = re.sub(r"<(page_type|page_name|module_name)>.*?</\1>", "", block_text, flags=re.DOTALL).strip()
-    return page_type, page_name, module_name, content
-
-# --- HTML Processing ---
-def process_html_content(raw_text):
-    fallback_html = raw_text
-    fallback_html = re.sub(r"<accordion>\s*Title:\s*(.*?)\s*Content:\s*(.*?)</accordion>",
-                           lambda m: TEMPLATES["accordion"].format(title=m.group(1).strip(), body=m.group(2).strip()),
-                           fallback_html, flags=re.DOTALL)
-    fallback_html = re.sub(r"<callout>(.*?)</callout>",
-                           lambda m: TEMPLATES["callout"].format(body=m.group(1)),
-                           fallback_html, flags=re.DOTALL)
-    fallback_html = convert_bullets(fallback_html)
-    return convert_to_html_with_openai(raw_text, fallback_html)
-
 # --- Main Logic ---
 if uploaded_file and canvas_domain and course_id and token:
     pages = extract_canvas_pages(uploaded_file)
@@ -263,11 +202,12 @@ if uploaded_file and canvas_domain and course_id and token:
         page_title = block["title"]
         module_name = block["module"]
         raw = block["content"]
-
         html_body = process_html_content(raw)
 
         st.markdown(f"### {i+1}. {page_title} ({page_type}) in {module_name}")
         st.code(html_body, language="html")
+        with st.expander("📄 Preview HTML Rendered Output"):
+            st.markdown(html_body, unsafe_allow_html=True)
 
         if st.button(f"Send '{page_title}' to Canvas", key=i):
             mid = get_or_create_module(module_name, canvas_domain, course_id, token, module_cache)
