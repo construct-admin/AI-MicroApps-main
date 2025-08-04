@@ -1,4 +1,3 @@
-
 import streamlit as st
 import requests
 import re
@@ -42,7 +41,7 @@ def extract_canvas_pages(docx_file):
     for para in doc.paragraphs:
         text = para.text.strip()
         style = para.style.name.lower() if para.style else ""
-        if "horizontal" in style or para._element.xpath('.//w:hr'):  # handle horizontal line
+        if "horizontal" in style or para._element.xpath('.//w:hr'):
             if current["title"]:
                 pages.append(current.copy())
                 current = {"module": current["module"], "title": "", "type": "page", "content": ""}
@@ -63,8 +62,7 @@ def extract_canvas_pages(docx_file):
 
 def convert_to_html_with_openai(docx_text, fallback_html):
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+        client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
         prompt = f"""Convert the following storyboard content to HTML. Preserve formatting like headings, bold, italics, and lists. Replace <accordion> and <callout> with HTML.\nContent:\n{docx_text}\nOutput only valid HTML."""
         response = client.chat.completions.create(
             model="gpt-4o",
