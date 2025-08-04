@@ -54,8 +54,9 @@ Replace the following tags with valid HTML (using inline CSS):
 - Bullet points starting with '-' → <ul><li>...</li></ul>
 - <question><multiple choice> → Leave these blocks in-place for structured Canvas parsing
 - if there are no <...> tags, do not add in tags or restructure, just convert to HTML.
-- tags can be in formatted text, if they are, ignore the formatting and apply the tag as you would normally.
-- tags in <h1> are usually page headings
+- do not use html``` indicators 
+
+<...> indicate that it is a tag. The tag can be found in the formatted headings as well. 
 
 Keep paragraphs and indentation intact.
 
