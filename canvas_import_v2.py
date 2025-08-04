@@ -194,8 +194,41 @@ def parse_quiz_questions(raw):
 # --- Text Parsing ---
 def extract_canvas_pages(docx_file):
     doc = Document(docx_file)
-    full_text = '\n'.join([para.text for para in doc.paragraphs])
-    return re.findall(r"<canvas_page>(.*?)</canvas_page>", full_text, re.DOTALL)
+    pages = []
+    current = {"module": "General", "title": "", "type": "page", "content": ""}
+
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        style = para.style.name.lower() if para.style else ""
+
+        # End of page: horizontal line or manual divider
+        if "horizontal line" in style or "---" in text:
+            if current["title"]:
+                pages.append(current.copy())
+                current = {"module": current["module"], "title": "", "type": "page", "content": ""}
+            continue
+
+        # Detect tags in headings
+        if "[module]" in text.lower():
+            current["module"] = text.replace("[module]", "").strip()
+        elif "[lesson]" in text.lower():
+            if current["title"]:
+                pages.append(current.copy())
+                current = {"module": current["module"], "title": "", "type": "page", "content": ""}
+            current["title"] = text.replace("[lesson]", "").strip()
+        elif "[assignment]" in text.lower():
+            current["type"] = "assignment"
+        elif "[quiz]" in text.lower():
+            current["type"] = "quiz"
+        elif "[discussion]" in text.lower():
+            current["type"] = "discussion"
+        else:
+            current["content"] += text + "\n"
+
+    if current["title"]:
+        pages.append(current.copy())
+
+    return pages
 
 def parse_page_block(block_text):
     def extract_tag(tag):
@@ -226,7 +259,11 @@ if uploaded_file and canvas_domain and course_id and token:
 
     st.subheader("Detected Pages")
     for i, block in enumerate(pages):
-        page_type, page_title, module_name, raw = parse_page_block(block)
+        page_type = block["type"]
+        page_title = block["title"]
+        module_name = block["module"]
+        raw = block["content"]
+
         html_body = process_html_content(raw)
 
         st.markdown(f"### {i+1}. {page_title} ({page_type}) in {module_name}")
