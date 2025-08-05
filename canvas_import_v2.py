@@ -52,18 +52,19 @@ def extract_canvas_pages(docx_file):
                 current = {"module": current["module"], "title": "", "type": "page", "content": ""}
             continue
 
-        if "[module]" in text.lower():
-            current["module"] = text.replace("[module]", "").strip()
-        elif "[lesson]" in text.lower():
+        if "<module_name>" in text.lower():
+            current["module"] = re.sub(r'<.*?>', '', text).strip()
+        elif "<page_name>" in text.lower():
             if current["title"]:
                 pages.append(current.copy())
                 current = {"module": current["module"], "title": "", "type": "page", "content": ""}
-            current["title"] = text.replace("[lesson]", "").strip()
-        elif "[assignment]" in text.lower(): current["type"] = "assignment"
-        elif "[quiz]" in text.lower(): current["type"] = "quiz"
-        elif "[discussion]" in text.lower(): current["type"] = "discussion"
-        else: current["content"] += text + "\n"
-    if current["title"]: pages.append(current.copy())
+            current["title"] = re.sub(r'<.*?>', '', text).strip()
+        elif "<page_type>" in text.lower():
+            current["type"] = re.sub(r'<.*?>', '', text).strip().lower()
+        else:
+            current["content"] += text + "\n"
+    if current["title"]:
+        pages.append(current.copy())
     return pages
 
 def convert_to_html_with_openai(docx_text, fallback_html):
@@ -135,7 +136,7 @@ if uploaded_file and canvas_domain and course_id and token:
     module_cache = {}
 
     if not pages:
-        st.warning("⚠️ No Canvas pages detected in this document. Check for [lesson], [module], and horizontal lines.")
+        st.warning("⚠️ No Canvas pages detected in this document. Check for tags like <module_name>, <page_type>, <page_name>.")
 
     st.subheader("Detected Pages")
     for i, block in enumerate(pages):
