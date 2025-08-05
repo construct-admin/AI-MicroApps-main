@@ -70,7 +70,10 @@ def extract_canvas_pages(docx_file):
 def convert_to_html_with_openai(docx_text, fallback_html):
     try:
         client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-        prompt = f"""Convert the following storyboard content to HTML. Preserve formatting like headings, bold, italics, and lists. Replace <accordion> and <callout> with HTML.\nContent:\n{docx_text}\nOutput only valid HTML."""
+        prompt = f"""Convert the following document content to HTML. Preserve formatting like headings, bold, italics, and lists. Replace <accordion> and <callout> with HTML.\nContent:\n{docx_text}\nOutput only valid HTML. Page seperators are horizontal lines within the storyboard. <module_name> is the name of the module. <page_title> is the name of the page. Content following that is content to onto the canvas page and should be converted to html preserving formatting. <page_type> is the determining factor. It determines if a page is a page, assignment, discussion or quiz. Tags on the page such as <accordion> must be converted to html. 
+        Template accordion code is:
+        <details><summary style="cursor: pointer; font-weight: bold; background-color:#0077b6; color:white; padding:10px; border-radius:5px;">{title} <small>(click to reveal)</small></summary><div style="padding:10px 20px; margin-top: 10px; background-color:#f2f2f2; color:#333;">{body}</div></details>
+        The first line is always the title and the content begins at the second line. """
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": prompt}],
