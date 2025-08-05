@@ -6,7 +6,7 @@ import openai
 
 # --- UI Setup ---
 st.set_page_config(page_title="Canvas Storyboard Importer with AI", layout="centered")
-st.title("🧩 Canvas Storyboard Importer with AI HTML Generator")
+st.title("🧹 Canvas Storyboard Importer with AI HTML Generator")
 
 canvas_domain = st.text_input("Canvas Base URL (e.g. canvas.instructure.com)")
 course_id = st.text_input("Canvas Course ID")
@@ -85,10 +85,26 @@ def convert_to_html_with_openai(docx_text, fallback_html):
         return fallback_html
 
 def process_html_content(raw_text):
-    fallback_html = re.sub(r"<accordion>\s*Title:\s*(.*?)\s*Content:\s*(.*?)</accordion>",
-        lambda m: TEMPLATES["accordion"].format(title=m.group(1).strip(), body=m.group(2).strip()), raw_text, flags=re.DOTALL)
-    fallback_html = re.sub(r"<callout>(.*?)</callout>",
-        lambda m: TEMPLATES["callout"].format(body=m.group(1)), fallback_html, flags=re.DOTALL)
+    try:
+        fallback_html = re.sub(
+            r"<accordion>\s*Title:\s*(.*?)\s*Content:\s*(.*?)</accordion>",
+            lambda m: TEMPLATES["accordion"].format(
+                title=m.group(1).strip() if m.group(1) else "Accordion",
+                body=m.group(2).strip() if m.group(2) else ""
+            ),
+            raw_text, flags=re.DOTALL)
+    except Exception as e:
+        st.warning(f"⚠️ Error in accordion fallback: {e}")
+        fallback_html = raw_text
+
+    try:
+        fallback_html = re.sub(
+            r"<callout>(.*?)</callout>",
+            lambda m: TEMPLATES["callout"].format(body=m.group(1) if m.group(1) else ""),
+            fallback_html, flags=re.DOTALL)
+    except Exception as e:
+        st.warning(f"⚠️ Error in callout fallback: {e}")
+
     fallback_html = convert_bullets(fallback_html)
     return convert_to_html_with_openai(raw_text, fallback_html)
 
@@ -173,3 +189,4 @@ if uploaded_file and canvas_domain and course_id and token:
                 st.success(f"✅ '{title}' uploaded to '{module}'!")
             else:
                 st.error(f"❌ Failed to upload '{title}'")
+
