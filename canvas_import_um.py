@@ -122,7 +122,7 @@ TAGS YOU WILL SEE:
 <page_title> = title of the page
 <module_name> = name of the module
 <quiz_title> = title of the quiz
-<question> = question block
+<question> = question block. These get sent to Canvas as quiz questions.
 <multiple_choice> = multiple choice question
 * before a choice = correct answer
 
