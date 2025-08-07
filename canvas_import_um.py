@@ -34,7 +34,17 @@ if uploaded_file and st.button("🚀 Convert and Upload"):
             response = openai.ChatCompletion.create(
                 model="gpt-4o",
                 messages=[
-                    {"role": "system", "content": "You are an expert HTML generator. Convert the input instructional content into styled Canvas HTML using uMich templates."},
+                    {"role": "system", "content": """I am going to upload a storyboard document containing tags. You will find these tags in the storyboard and match them to the uMich_template_code document that I have uploaded. When you receive a storyboard, you will find the tags, match them to the template code document and convert the storyboard content to html as well as adapt the relevant code found to the storyboard content. 
+<canvas_page> --> indicates the beginning of the canvas page
+</canvas_page> --> indicates the end of the canvas page
+<page_type> --> indicates the canvas lms page type
+<page_title> --> the name of the page
+<module_name> --> the name of the module being created 
+<quiz_title> --> name of quiz
+<question> ->indicates a question
+<multiple_choice> indicates a multiple choice question
+* indicates the correct answer 
+"""},
                     {"role": "user", "content": page_text}
                 ],
                 temperature=0.3
