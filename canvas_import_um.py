@@ -202,25 +202,24 @@ def add_to_module(domain, course_id, module_id, item_type, item_ref, title, toke
     return requests.post(url, headers=headers, json=payload).ok
 
 # --- MAIN LOGIC ---
-if folder_url and canvas_domain and course_id and token and creds_json:
-    folder_id = extract_folder_id(folder_url)
-    if not folder_id:
-        st.error("❌ Invalid folder URL")
-    else:
-        creds = json.loads(creds_json.read())
-        g_creds = service_account.Credentials.from_service_account_info(creds, scopes=SCOPES)
-        files = list_google_docs_in_folder(folder_id, g_creds)
+doc_url_or_id = st.text_input("Google Doc URL or ID")
+
+if doc_url_or_id and canvas_domain and course_id and token and creds_json:
+    creds = json.loads(creds_json.read())
+    g_creds = service_account.Credentials.from_service_account_info(creds, scopes=SCOPES)
+
+    # Extract just the doc ID from a full URL if needed
+    match = re.search(r"/document/d/([a-zA-Z0-9_-]+)", doc_url_or_id)
+    doc_id = match.group(1) if match else doc_url_or_id.strip()
+
+    try:
+        text = get_gdoc_text(doc_id, g_creds)
+        pages = extract_tagged_blocks(text)
         module_cache = {}
 
-        for file in files:
-            st.header(f"📄 {file['name']}")
-            text = get_gdoc_text(file['id'], g_creds)
-            pages = extract_tagged_blocks(text)
-
-            if not pages:
-                st.warning(f"⚠️ No pages found in {file['name']}")
-                continue
-
+        if not pages:
+            st.warning(f"⚠️ No Canvas pages detected in this document. Check for tags like <module_name>, <page_type>, <page_name>.")
+        else:
             for i, page in enumerate(pages):
                 st.markdown(f"### {i+1}. {page['title']} ({page['type']})")
                 html = build_html_from_template(page['type'], page['content'])
@@ -229,7 +228,7 @@ if folder_url and canvas_domain and course_id and token and creds_json:
                 with st.expander("🔍 Preview"):
                     st.markdown(html, unsafe_allow_html=True)
 
-                if st.button(f"Upload '{page['title']}' from {file['name']}", key=f"{file['id']}-{i}"):
+                if st.button(f"Upload '{page['title']}'", key=f"{doc_id}-{i}"):
                     mid = get_or_create_module(page['module'], canvas_domain, course_id, token, module_cache)
                     if mid:
                         ref = create_page(canvas_domain, course_id, page['title'], html, token)
@@ -237,3 +236,7 @@ if folder_url and canvas_domain and course_id and token and creds_json:
                             st.success(f"✅ Uploaded '{page['title']}' to '{page['module']}'!")
                         else:
                             st.error("❌ Upload failed.")
+    except Exception as e:
+        st.error(f"❌ Error loading Google Doc: {e}")
+
+
