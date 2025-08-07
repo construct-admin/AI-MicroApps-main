@@ -65,7 +65,8 @@ def get_or_create_module(module_name, domain, course_id, token, module_cache):
         module_cache[module_name] = mid
         return mid
     else:
-        st.error(f"Failed to create/find module: {module_name}")
+        st.error(f"❌ Failed to create/find module: {module_name}")
+        st.error(f"📬 Response: {resp.status_code} | {resp.text}")
         return None
 
 def create_page(domain, course_id, title, html_body, token):
@@ -112,20 +113,22 @@ if uploaded_file and template_file and canvas_domain and course_id and canvas_to
         module_name = extract_tag("module_name", block)
 
         # fallback: search h1 inside the block
-# fallback: search <h1> inside the block
         if not module_name:
             h1_match = re.search(r"<h1>(.*?)</h1>", block, flags=re.IGNORECASE)
             if h1_match:
                 module_name = h1_match.group(1).strip()
                 st.info(f"📘 Using <h1> as module name: '{module_name}'")
 
-        # fallback: try using docx title (core properties) for first page
-        if not module_name and i == 0:
-            doc_title = doc_obj.core_properties.title
-            if doc_title:
-                module_name = doc_title.strip()
-                st.info(f"📘 Using document title as module name: '{module_name}'")
+        # fallback: extract from title like "3.0 Module Three Overview"
+        if not module_name:
+            title_match = re.search(r"\d+\.\d+\s+(Module\s+[\w\s]+)", page_title, flags=re.IGNORECASE)
+            if title_match:
+                module_name = title_match.group(1).strip()
+                st.info(f"📘 Extracted module name from title: '{module_name}'")
 
+        if not module_name:
+            module_name = "General"
+            st.warning(f"⚠️ No <module_name> tag or Heading 1 found for page {page_title}. Using default 'General'.")
 
         cache_key = f"{page_title}-{i}"
         if cache_key not in st.session_state.gpt_results:
