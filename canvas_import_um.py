@@ -1,9 +1,8 @@
 import streamlit as st
 from docx import Document
-import openai
+from openai import OpenAI
 import requests
 import re
-import os
 
 st.set_page_config(page_title="📄 DOCX → GPT → Canvas (Multi-Page)", layout="centered")
 st.title("📄 Upload DOCX → Convert via GPT → Upload to Canvas")
@@ -18,7 +17,6 @@ openai_api_key = st.text_input("OpenAI API Key", type="password")
 
 
 def split_into_pages(text):
-    # Split content by <page_type>...</page_type> tag blocks
     return re.split(r"<page_type>.*?</page_type>", text, flags=re.IGNORECASE | re.DOTALL)
 
 
@@ -37,7 +35,7 @@ if uploaded_file and template_file and st.button("🚀 Convert and Upload to Can
 
     st.success(f"📄 Found {len(pages)} page(s) in the storyboard.")
 
-    openai.api_key = openai_api_key
+    client = OpenAI(api_key=openai_api_key)
 
     for i, page_text in enumerate(pages):
         page_title = f"Page {i+1} from DOCX"
@@ -65,7 +63,7 @@ TAGS YOU WILL SEE:
 * before a choice = correct answer
 """
 
-            response = openai.ChatCompletion.create(
+            response = client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -74,7 +72,7 @@ TAGS YOU WILL SEE:
                 temperature=0.3
             )
 
-            html_result = response['choices'][0]['message']['content']
+            html_result = response.choices[0].message.content
             st.code(html_result, language='html')
 
         with st.spinner("📤 Uploading to Canvas..."):
