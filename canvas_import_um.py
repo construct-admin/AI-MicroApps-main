@@ -125,6 +125,8 @@ TAGS YOU WILL SEE:
 <question> = question block
 <multiple_choice> = multiple choice question
 * before a choice = correct answer
+
+Do  not add in the ```html tags, just return the HTML content.
 """
         user_prompt = block
 
