@@ -6,6 +6,7 @@ import requests
 import re
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+import json
 
 # --- CONFIG ---
 TEMPLATES = {
@@ -95,25 +96,37 @@ TEMPLATES = {
     "quote": '''<blockquote><p>{body}</p></blockquote>'''
 }
 
-SCOPES = ["https://www.googleapis.com/auth/documents.readonly"]
+SCOPES = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/documents.readonly"]
 
 # --- UI ---
 st.set_page_config(page_title="Canvas Importer with AI & Google Docs", layout="centered")
-st.title("📥 Canvas Storyboard Importer (Google Docs + AI)")
+st.title("📥 Canvas Storyboard Importer (Google Drive Folder + AI)")
 
-gdoc_id = st.text_input("Google Doc ID")
+folder_url = st.text_input("Google Drive Folder URL")
 canvas_domain = st.text_input("Canvas Base URL (e.g. canvas.instructure.com)")
 course_id = st.text_input("Canvas Course ID")
 token = st.text_input("Canvas API Token", type="password")
 creds_json = st.file_uploader("Upload Google Service Account JSON", type="json")
 
-# --- UTILS ---
+def extract_folder_id(folder_url):
+    match = re.search(r"/folders/([a-zA-Z0-9_-]+)", folder_url)
+    return match.group(1) if match else None
+
+def list_google_docs_in_folder(folder_id, creds):
+    service = build('drive', 'v3', credentials=creds)
+    results = service.files().list(
+        q=f"'{folder_id}' in parents and mimeType='application/vnd.google-apps.document'",
+        fields="files(id, name)").execute()
+    return results.get("files", [])
+
 def get_gdoc_text(doc_id, creds):
-    creds = service_account.Credentials.from_service_account_info(creds, scopes=SCOPES)
     service = build('docs', 'v1', credentials=creds)
     doc = service.documents().get(documentId=doc_id).execute()
     content = doc.get("body", {}).get("content", [])
-    return "\n".join([el.get("paragraph", {}).get("elements", [{}])[0].get("textRun", {}).get("content", "") for el in content if "paragraph" in el])
+    return "\n".join([
+        el.get("paragraph", {}).get("elements", [{}])[0].get("textRun", {}).get("content", "")
+        for el in content if "paragraph" in el
+    ])
 
 def extract_tagged_blocks(text):
     pages = []
@@ -189,29 +202,38 @@ def add_to_module(domain, course_id, module_id, item_type, item_ref, title, toke
     return requests.post(url, headers=headers, json=payload).ok
 
 # --- MAIN LOGIC ---
-if gdoc_id and canvas_domain and course_id and token and creds_json:
-    creds = creds_json.read()
-    import json
-    text = get_gdoc_text(gdoc_id, json.loads(creds))
-    pages = extract_tagged_blocks(text)
-    module_cache = {}
+if folder_url and canvas_domain and course_id and token and creds_json:
+    folder_id = extract_folder_id(folder_url)
+    if not folder_id:
+        st.error("❌ Invalid folder URL")
+    else:
+        creds = json.loads(creds_json.read())
+        g_creds = service_account.Credentials.from_service_account_info(creds, scopes=SCOPES)
+        files = list_google_docs_in_folder(folder_id, g_creds)
+        module_cache = {}
 
-    if not pages:
-        st.warning("⚠️ No pages detected. Make sure you include <module_name>, <page_name>, and optionally <page_type>.")
+        for file in files:
+            st.header(f"📄 {file['name']}")
+            text = get_gdoc_text(file['id'], g_creds)
+            pages = extract_tagged_blocks(text)
 
-    for i, page in enumerate(pages):
-        st.markdown(f"### {i+1}. {page['title']} ({page['type']})")
-        html = build_html_from_template(page['type'], page['content'])
-        html = convert_to_html_with_openai(html)
-        st.code(html, language="html")
-        with st.expander("🔍 Preview"):
-            st.markdown(html, unsafe_allow_html=True)
+            if not pages:
+                st.warning(f"⚠️ No pages found in {file['name']}")
+                continue
 
-        if st.button(f"Upload '{page['title']}'", key=i):
-            mid = get_or_create_module(page['module'], canvas_domain, course_id, token, module_cache)
-            if mid:
-                ref = create_page(canvas_domain, course_id, page['title'], html, token)
-                if ref and add_to_module(canvas_domain, course_id, mid, "Page", ref, page['title'], token):
-                    st.success(f"✅ Uploaded to '{page['module']}'!")
-                else:
-                    st.error("❌ Upload failed.")
+            for i, page in enumerate(pages):
+                st.markdown(f"### {i+1}. {page['title']} ({page['type']})")
+                html = build_html_from_template(page['type'], page['content'])
+                html = convert_to_html_with_openai(html)
+                st.code(html, language="html")
+                with st.expander("🔍 Preview"):
+                    st.markdown(html, unsafe_allow_html=True)
+
+                if st.button(f"Upload '{page['title']}' from {file['name']}", key=f"{file['id']}-{i}"):
+                    mid = get_or_create_module(page['module'], canvas_domain, course_id, token, module_cache)
+                    if mid:
+                        ref = create_page(canvas_domain, course_id, page['title'], html, token)
+                        if ref and add_to_module(canvas_domain, course_id, mid, "Page", ref, page['title'], token):
+                            st.success(f"✅ Uploaded '{page['title']}' to '{page['module']}'!")
+                        else:
+                            st.error("❌ Upload failed.")
