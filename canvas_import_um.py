@@ -16,7 +16,7 @@ course_id = st.text_input("Canvas Course ID")
 canvas_token = st.text_input("Canvas API Token", type="password")
 openai_api_key = st.text_input("OpenAI API Key", type="password")
 dry_run = st.checkbox("🔍 Preview only (Dry Run)")
-bulk_upload = st.checkbox("📄 Upload all pages automatically (no buttons)", value=False)
+
 if dry_run:
     st.info("No data will be sent to Canvas. This is a preview only.")
 
@@ -26,7 +26,6 @@ def extract_canvas_pages(docx_file):
     pages = []
     current_block = []
     inside_block = False
-
     for para in doc.paragraphs:
         text = para.text.strip()
         if "<canvas_page>" in text.lower():
@@ -40,7 +39,6 @@ def extract_canvas_pages(docx_file):
             continue
         if inside_block:
             current_block.append(text)
-
     st.success(f"✅ Found {len(pages)} <canvas_page> block(s).")
     return pages
 
@@ -76,17 +74,10 @@ def create_page(domain, course_id, title, html_body, token):
     response = requests.post(url, headers=headers, json=payload)
     return response.json().get("url") if response.status_code in (200, 201) else None
 
-def add_to_module(domain, course_id, module_id, item_type, item_url, title, token):
+def add_to_module(domain, course_id, module_id, item_url, title, token):
     headers = {"Authorization": f"Bearer {token}"}
     url = f"https://{domain}/api/v1/courses/{course_id}/modules/{module_id}/items"
-    payload = {
-        "module_item": {
-            "type": "Page",
-            "page_url": item_url,
-            "title": title,
-            "published": True
-        }
-    }
+    payload = {"module_item": {"type": "Page", "page_url": item_url, "title": title, "published": True}}
     response = requests.post(url, headers=headers, json=payload)
     return response.status_code in (200, 201)
 
@@ -96,35 +87,39 @@ def load_docx_text(file):
 
 # --- Main Logic ---
 if uploaded_file and template_file and canvas_domain and course_id and canvas_token and openai_api_key:
+    # Cache GPT results so clicking buttons doesn't recompute
     if "gpt_results" not in st.session_state:
         st.session_state.gpt_results = {}
 
     pages = extract_canvas_pages(uploaded_file)
     template_text = load_docx_text(template_file)
-    doc_obj = Document(uploaded_file)
     client = OpenAI(api_key=openai_api_key)
     module_cache = {}
     last_known_module_name = None
 
     st.subheader("Detected Pages")
+
+    # Global Upload All button
+    upload_all_clicked = st.button("🚀 Upload ALL pages", disabled=dry_run)
+    uploaded_any = False
+
     for i, block in enumerate(pages):
         block = block.strip()
         page_type = extract_tag("page_type", block).lower() or "page"
         page_title = extract_tag("page_title", block) or f"Page {i+1}"
         module_name = extract_tag("module_name", block)
 
+        # Fallbacks for module name
         if not module_name:
             h1_match = re.search(r"<h1>(.*?)</h1>", block, flags=re.IGNORECASE)
             if h1_match:
                 module_name = h1_match.group(1).strip()
                 st.info(f"📘 Using <h1> as module name: '{module_name}'")
-
         if not module_name:
             title_match = re.search(r"\d+\.\d+\s+(Module\s+[\w\s]+)", page_title, flags=re.IGNORECASE)
             if title_match:
                 module_name = title_match.group(1).strip()
                 st.info(f"📘 Extracted module name from title: '{module_name}'")
-
         if not module_name:
             if last_known_module_name:
                 module_name = last_known_module_name
@@ -195,7 +190,8 @@ Return:
 
                 st.session_state.gpt_results[cache_key] = {
                     "html": html_result,
-                    "quiz_json": quiz_json
+                    "quiz_json": quiz_json,
+                    "meta": {"page_type": page_type, "page_title": page_title, "module_name": module_name}
                 }
         else:
             html_result = st.session_state.gpt_results[cache_key]["html"]
@@ -203,16 +199,33 @@ Return:
 
         with st.expander(f"📄 {page_title} ({page_type}) | Module: {module_name}", expanded=True):
             st.code(html_result, language="html")
+            # Per-page upload button (no forms inside expander)
+            if not dry_run and st.button(f"🚀 Upload '{page_title}'", key=f"upload_{i}"):
+                mid = get_or_create_module(module_name, canvas_domain, course_id, canvas_token, module_cache)
+                if mid:
+                    if page_type == "page":
+                        page_url = create_page(canvas_domain, course_id, page_title, html_result, canvas_token)
+                        if page_url and add_to_module(canvas_domain, course_id, mid, page_url, page_title, canvas_token):
+                            st.success(f"✅ Page '{page_title}' created and added to '{module_name}'")
+                            uploaded_any = True
+                        else:
+                            st.error("❌ Upload failed.")
+                    else:
+                        st.warning("Only 'page' uploads are implemented in this version.")
+                else:
+                    st.error("❌ Module creation failed.")
 
-            if bulk_upload or dry_run:
-                st.info("Dry run or bulk mode – skipping form button.")
+        # Upload ALL handler
+        if upload_all_clicked and not dry_run:
+            mid = get_or_create_module(module_name, canvas_domain, course_id, canvas_token, module_cache)
+            if mid:
+                if page_type == "page":
+                    page_url = create_page(canvas_domain, course_id, page_title, html_result, canvas_token)
+                    if page_url and add_to_module(canvas_domain, course_id, mid, page_url, page_title, canvas_token):
+                        uploaded_any = True
+                        st.success(f"✅ (All) Page '{page_title}' added to '{module_name}'")
             else:
-                with st.form(f"upload_form_{i}"):
-                    if st.form_submit_button("🚀 Upload"):
-                        mid = get_or_create_module(module_name, canvas_domain, course_id, canvas_token, module_cache)
-                        if not mid:
-                            st.stop()
-                        if page_type == "page":
-                            page_url = create_page(canvas_domain, course_id, page_title, html_result, canvas_token)
-                            if page_url and add_to_module(canvas_domain, course_id, mid, "Page", page_url, page_title, canvas_token):
-                                st.success(f"✅ Page '{page_title}' created and added to '{module_name}'")
+                st.error(f"❌ (All) Module creation failed for '{module_name}'")
+
+    if upload_all_clicked and not dry_run and not uploaded_any:
+        st.warning("No pages were uploaded. Check tokens/IDs and try again.")
