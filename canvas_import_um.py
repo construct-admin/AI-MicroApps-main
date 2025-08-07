@@ -38,11 +38,16 @@ if uploaded_file and template_file and st.button("🚀 Convert and Upload to Can
     client = OpenAI(api_key=openai_api_key)
 
     for i, page_text in enumerate(pages):
-        page_title = f"Page {i+1} from DOCX"
-        st.markdown(f"### ✨ Processing: {page_title}")
+        page_type_match = re.search(r"<page_type>(.*?)</page_type>", page_text, re.IGNORECASE)
+        page_type = page_type_match.group(1).strip().lower() if page_type_match else "page"
 
-        with st.spinner(f"🤖 Sending Page {i+1} to GPT..."):
-            system_prompt = f"""
+        page_title_match = re.search(r"<page_title>(.*?)</page_title>", page_text, re.IGNORECASE)
+        page_title = page_title_match.group(1).strip() if page_title_match else f"Page {i+1}"
+
+        st.markdown(f"### ✨ Processing: {page_title} [{page_type}]")
+
+        with st.spinner(f"🤖 Sending {page_type} to GPT..."):
+            system_prompt = f""" 
 You are an expert Canvas HTML generator.
 Below is a set of uMich Canvas LMS HTML templates followed by a storyboard page using tags.
 
@@ -61,7 +66,7 @@ TAGS YOU WILL SEE:
 <question> = question block
 <multiple_choice> = multiple choice question
 * before a choice = correct answer
-"""
+""" 
 
             response = client.chat.completions.create(
                 model="gpt-4o",
@@ -77,17 +82,43 @@ TAGS YOU WILL SEE:
 
         with st.spinner("📤 Uploading to Canvas..."):
             headers = {"Authorization": f"Bearer {canvas_token}"}
-            payload = {
-                "wiki_page": {
+
+            if page_type == "page":
+                url = f"{canvas_domain}/api/v1/courses/{course_id}/pages"
+                payload = {
+                    "wiki_page": {
+                        "title": page_title,
+                        "body": html_result,
+                        "published": True
+                    }
+                }
+
+            elif page_type == "discussion":
+                url = f"{canvas_domain}/api/v1/courses/{course_id}/discussion_topics"
+                payload = {
                     "title": page_title,
-                    "body": html_result,
+                    "message": html_result,
                     "published": True
                 }
-            }
-            url = f"{canvas_domain}/api/v1/courses/{course_id}/pages"
+
+            elif page_type == "quiz":
+                url = f"{canvas_domain}/api/v1/courses/{course_id}/quizzes"
+                payload = {
+                    "quiz": {
+                        "title": page_title,
+                        "description": html_result,
+                        "published": True,
+                        "quiz_type": "assignment"
+                    }
+                }
+
+            else:
+                st.error(f"❌ Unsupported <page_type>: {page_type}")
+                continue
+
             r = requests.post(url, headers=headers, json=payload)
 
             if r.status_code == 200:
-                st.success(f"✅ Page {i+1} uploaded to Canvas as '{page_title}'")
+                st.success(f"✅ {page_type.title()} uploaded as '{page_title}'")
             else:
-                st.error(f"❌ Failed to upload Page {i+1}: {r.text}")
+                st.error(f"❌ Failed to upload {page_type}: {r.text}")
