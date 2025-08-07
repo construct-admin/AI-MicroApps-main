@@ -121,7 +121,8 @@ TAGS YOU WILL SEE:
 Return:
 1. HTML content for the page (no ```html tags)
 2. If page_type is quiz, also return structured JSON like:
-"""
+
+```
 {
   "quiz_description": "<html description>",
   "questions": [
@@ -131,8 +132,9 @@ Return:
     ...
   ]
 }
+```
 """
-        """
+
         user_prompt = block
 
         with st.spinner(f"🤖 Converting page {i+1} [{page_title}] via GPT..."):
