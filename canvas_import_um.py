@@ -208,7 +208,7 @@ Return:
                 st.info("Dry run or bulk mode – skipping form button.")
             else:
                 with st.form(f"upload_form_{i}"):
-                    if st.form_submit_button(f"🚀 Upload '{page_title}'"):
+                    if st.form_submit_button("🚀 Upload"):
                         mid = get_or_create_module(module_name, canvas_domain, course_id, canvas_token, module_cache)
                         if not mid:
                             st.stop()
