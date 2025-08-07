@@ -16,6 +16,7 @@ course_id = st.text_input("Canvas Course ID")
 canvas_token = st.text_input("Canvas API Token", type="password")
 openai_api_key = st.text_input("OpenAI API Key", type="password")
 dry_run = st.checkbox("🔍 Preview only (Dry Run)")
+bulk_upload = st.checkbox("📤 Upload all pages automatically (no buttons)", value=False)
 if dry_run:
     st.info("No data will be sent to Canvas. This is a preview only.")
 
@@ -162,63 +163,67 @@ Return:
         st.markdown(f"### 📄 {page_title} ({page_type}) in module: {module_name}")
         st.code(html_result, language="html")
 
-        with st.form(key=f"form_{i}"):
-            submit = st.form_submit_button(f"🚀 Upload '{page_title}'")
-            if submit:
-                mid = get_or_create_module(module_name, canvas_domain, course_id, canvas_token, module_cache)
-                if not mid:
-                    continue
-                if dry_run:
-                    st.info(f"[Dry Run] Skipped upload of '{page_title}'")
-                    continue
+        if bulk_upload:
+            submit = True
+        else:
+            with st.form(key=f"form_{i}"):
+                submit = st.form_submit_button(f"🚀 Upload '{page_title}'")
 
-                if page_type == "assignment":
-                    aid = create_assignment(canvas_domain, course_id, page_title, html_result, canvas_token)
-                    if aid and add_to_module(canvas_domain, course_id, mid, "Assignment", aid, page_title, canvas_token):
-                        st.success(f"✅ Assignment '{page_title}' created and added to '{module_name}'")
+        if submit:
+            mid = get_or_create_module(module_name, canvas_domain, course_id, canvas_token, module_cache)
+            if not mid:
+                continue
+            if dry_run:
+                st.info(f"[Dry Run] Skipped upload of '{page_title}'")
+                continue
 
-                elif page_type == "discussion":
-                    url = f"https://{canvas_domain}/api/v1/courses/{course_id}/discussion_topics"
+            if page_type == "assignment":
+                aid = create_assignment(canvas_domain, course_id, page_title, html_result, canvas_token)
+                if aid and add_to_module(canvas_domain, course_id, mid, "Assignment", aid, page_title, canvas_token):
+                    st.success(f"✅ Assignment '{page_title}' created and added to '{module_name}'")
+
+            elif page_type == "discussion":
+                url = f"https://{canvas_domain}/api/v1/courses/{course_id}/discussion_topics"
+                headers = {"Authorization": f"Bearer {canvas_token}", "Content-Type": "application/json"}
+                payload = {"title": page_title, "message": html_result, "published": True}
+                resp = requests.post(url, headers=headers, json=payload)
+                if resp.status_code in (200, 201):
+                    did = resp.json().get("id")
+                    if add_to_module(canvas_domain, course_id, mid, "Discussion", did, page_title, canvas_token):
+                        st.success(f"✅ Discussion '{page_title}' created and added to '{module_name}'")
+
+            elif page_type == "quiz":
+                try:
+                    if not quiz_json:
+                        raise ValueError("No quiz JSON detected")
+                    description = quiz_json.get("quiz_description", "")
+                    url = f"https://{canvas_domain}/api/v1/courses/{course_id}/quizzes"
                     headers = {"Authorization": f"Bearer {canvas_token}", "Content-Type": "application/json"}
-                    payload = {"title": page_title, "message": html_result, "published": True}
+                    payload = {"quiz": {"title": page_title, "description": description, "published": True, "quiz_type": "assignment"}}
                     resp = requests.post(url, headers=headers, json=payload)
                     if resp.status_code in (200, 201):
-                        did = resp.json().get("id")
-                        if add_to_module(canvas_domain, course_id, mid, "Discussion", did, page_title, canvas_token):
-                            st.success(f"✅ Discussion '{page_title}' created and added to '{module_name}'")
-
-                elif page_type == "quiz":
-                    try:
-                        if not quiz_json:
-                            raise ValueError("No quiz JSON detected")
-                        description = quiz_json.get("quiz_description", "")
-                        url = f"https://{canvas_domain}/api/v1/courses/{course_id}/quizzes"
-                        headers = {"Authorization": f"Bearer {canvas_token}", "Content-Type": "application/json"}
-                        payload = {"quiz": {"title": page_title, "description": description, "published": True, "quiz_type": "assignment"}}
-                        resp = requests.post(url, headers=headers, json=payload)
-                        if resp.status_code in (200, 201):
-                            qid = resp.json().get("id")
-                            for q in quiz_json.get("questions", []):
-                                q_url = f"https://{canvas_domain}/api/v1/courses/{course_id}/quizzes/{qid}/questions"
-                                q_payload = {
-                                    "question": {
-                                        "question_name": q.get("question_name", "Q"),
-                                        "question_text": q.get("question_text", ""),
-                                        "question_type": "multiple_choice_question",
-                                        "points_possible": 1,
-                                        "answers": [
-                                            {"text": ans.get("text"), "weight": 100 if ans.get("is_correct") else 0}
-                                            for ans in q.get("answers", [])
-                                        ]
-                                    }
+                        qid = resp.json().get("id")
+                        for q in quiz_json.get("questions", []):
+                            q_url = f"https://{canvas_domain}/api/v1/courses/{course_id}/quizzes/{qid}/questions"
+                            q_payload = {
+                                "question": {
+                                    "question_name": q.get("question_name", "Q"),
+                                    "question_text": q.get("question_text", ""),
+                                    "question_type": "multiple_choice_question",
+                                    "points_possible": 1,
+                                    "answers": [
+                                        {"text": ans.get("text"), "weight": 100 if ans.get("is_correct") else 0}
+                                        for ans in q.get("answers", [])
+                                    ]
                                 }
-                                requests.post(q_url, headers=headers, json=q_payload)
-                            if add_to_module(canvas_domain, course_id, mid, "Quiz", qid, page_title, canvas_token):
-                                st.success(f"✅ Quiz '{page_title}' with questions created and added to '{module_name}'")
-                    except Exception as e:
-                        st.error(f"Quiz creation failed: {e}")
+                            }
+                            requests.post(q_url, headers=headers, json=q_payload)
+                        if add_to_module(canvas_domain, course_id, mid, "Quiz", qid, page_title, canvas_token):
+                            st.success(f"✅ Quiz '{page_title}' with questions created and added to '{module_name}'")
+                except Exception as e:
+                    st.error(f"Quiz creation failed: {e}")
 
-                else:
-                    page_url = create_page(canvas_domain, course_id, page_title, html_result, canvas_token)
-                    if page_url and add_to_module(canvas_domain, course_id, mid, "Page", page_url, page_title, canvas_token):
-                        st.success(f"✅ Page '{page_title}' created and added to '{module_name}'")
+            else:
+                page_url = create_page(canvas_domain, course_id, page_title, html_result, canvas_token)
+                if page_url and add_to_module(canvas_domain, course_id, mid, "Page", page_url, page_title, canvas_token):
+                    st.success(f"✅ Page '{page_title}' created and added to '{module_name}'")
