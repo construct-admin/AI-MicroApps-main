@@ -109,9 +109,22 @@ if uploaded_file and template_file and canvas_domain and course_id and canvas_to
         system_prompt = f"""
 You are an expert Canvas HTML generator.
 Below is a set of uMich Canvas LMS HTML templates followed by a storyboard page using tags.
+
 Match the tags to the templates and convert the storyboard content to styled HTML for Canvas.
+
 TEMPLATES:
 {template_text}
+
+TAGS YOU WILL SEE:
+<canvas_page> = start of Canvas page
+</canvas_page> = end of Canvas page
+<page_type> = Canvas page type
+<page_title> = title of the page
+<module_name> = name of the module
+<quiz_title> = title of the quiz
+<question> = question block
+<multiple_choice> = multiple choice question
+* before a choice = correct answer
 """
         user_prompt = block
 
