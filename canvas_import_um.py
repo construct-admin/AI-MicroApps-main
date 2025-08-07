@@ -112,15 +112,20 @@ if uploaded_file and template_file and canvas_domain and course_id and canvas_to
         module_name = extract_tag("module_name", block)
 
         # fallback: search h1 inside the block
+# fallback: search <h1> inside the block
         if not module_name:
             h1_match = re.search(r"<h1>(.*?)</h1>", block, flags=re.IGNORECASE)
             if h1_match:
                 module_name = h1_match.group(1).strip()
                 st.info(f"📘 Using <h1> as module name: '{module_name}'")
 
-        if not module_name:
-            module_name = "General"
-            st.warning(f"⚠️ No <module_name> tag or Heading 1 found for page {page_title}. Using default 'General'.")
+        # fallback: try using docx title (core properties) for first page
+        if not module_name and i == 0:
+            doc_title = doc_obj.core_properties.title
+            if doc_title:
+                module_name = doc_title.strip()
+                st.info(f"📘 Using document title as module name: '{module_name}'")
+
 
         cache_key = f"{page_title}-{i}"
         if cache_key not in st.session_state.gpt_results:
