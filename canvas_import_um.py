@@ -104,6 +104,7 @@ if uploaded_file and template_file and canvas_domain and course_id and canvas_to
     doc_obj = Document(uploaded_file)
     client = OpenAI(api_key=openai_api_key)
     module_cache = {}
+    last_known_module_name = None
 
     st.subheader("Detected Pages")
     for i, block in enumerate(pages):
@@ -112,14 +113,12 @@ if uploaded_file and template_file and canvas_domain and course_id and canvas_to
         page_title = extract_tag("page_title", block) or f"Page {i+1}"
         module_name = extract_tag("module_name", block)
 
-        # fallback: search h1 inside the block
         if not module_name:
             h1_match = re.search(r"<h1>(.*?)</h1>", block, flags=re.IGNORECASE)
             if h1_match:
                 module_name = h1_match.group(1).strip()
                 st.info(f"📘 Using <h1> as module name: '{module_name}'")
 
-        # fallback: extract from title like "3.0 Module Three Overview"
         if not module_name:
             title_match = re.search(r"\d+\.\d+\s+(Module\s+[\w\s]+)", page_title, flags=re.IGNORECASE)
             if title_match:
@@ -127,8 +126,14 @@ if uploaded_file and template_file and canvas_domain and course_id and canvas_to
                 st.info(f"📘 Extracted module name from title: '{module_name}'")
 
         if not module_name:
-            module_name = "General"
-            st.warning(f"⚠️ No <module_name> tag or Heading 1 found for page {page_title}. Using default 'General'.")
+            if last_known_module_name:
+                module_name = last_known_module_name
+                st.info(f"📘 Using previously found module name: '{module_name}'")
+            else:
+                module_name = "General"
+                st.warning(f"⚠️ No <module_name> tag or Heading 1 found for page {page_title}. Using default 'General'.")
+        else:
+            last_known_module_name = module_name
 
         cache_key = f"{page_title}-{i}"
         if cache_key not in st.session_state.gpt_results:
