@@ -90,6 +90,9 @@ def load_docx_text(file):
 
 # --- Main Logic ---
 if uploaded_file and template_file and canvas_domain and course_id and canvas_token and openai_api_key:
+    if "gpt_results" not in st.session_state:
+        st.session_state.gpt_results = {}
+
     pages = extract_canvas_pages(uploaded_file)
     module_cache = {}
     template_text = load_docx_text(template_file)
@@ -102,7 +105,10 @@ if uploaded_file and template_file and canvas_domain and course_id and canvas_to
         page_title = extract_tag("page_title", block) or f"Page {i+1}"
         module_name = extract_tag("module_name", block) or "General"
 
-        system_prompt = f"""
+        cache_key = f"{page_title}-{i}"
+        if cache_key not in st.session_state.gpt_results:
+            with st.spinner(f"🤖 Converting page {i+1} [{page_title}] via GPT..."):
+                system_prompt = f"""
 You are an expert Canvas HTML generator.
 Below is a set of uMich Canvas LMS HTML templates followed by a storyboard page using tags.
 
@@ -135,30 +141,35 @@ Return:
       ]
     }}
 """
-        user_prompt = block
-
-        with st.spinner(f"🤖 Converting page {i+1} [{page_title}] via GPT..."):
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.3
-            )
-            raw = response.choices[0].message.content.strip()
-            cleaned = re.sub(r"```(html|json)?", "", raw, flags=re.IGNORECASE).strip()
-            match = re.search(r"({[\s\S]+})$", cleaned)
-            if match:
-                html_result = cleaned[:match.start()].strip()
-                try:
-                    quiz_json = json.loads(match.group(1))
-                except Exception as e:
+                response = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": block}
+                    ],
+                    temperature=0.3
+                )
+                raw = response.choices[0].message.content.strip()
+                cleaned = re.sub(r"```(html|json)?", "", raw, flags=re.IGNORECASE).strip()
+                match = re.search(r"({[\s\S]+})$", cleaned)
+                if match:
+                    html_result = cleaned[:match.start()].strip()
+                    try:
+                        quiz_json = json.loads(match.group(1))
+                    except Exception as e:
+                        quiz_json = None
+                        st.error(f"❌ Quiz JSON parsing failed: {e}")
+                else:
+                    html_result = cleaned
                     quiz_json = None
-                    st.error(f"❌ Quiz JSON parsing failed: {e}")
-            else:
-                html_result = cleaned
-                quiz_json = None
+
+                st.session_state.gpt_results[cache_key] = {
+                    "html": html_result,
+                    "quiz_json": quiz_json
+                }
+        else:
+            html_result = st.session_state.gpt_results[cache_key]["html"]
+            quiz_json = st.session_state.gpt_results[cache_key]["quiz_json"]
 
         st.markdown(f"### 📄 {page_title} ({page_type}) in module: {module_name}")
         st.code(html_result, language="html")
