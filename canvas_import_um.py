@@ -29,18 +29,15 @@ def extract_canvas_pages(docx_file):
 
     for para in doc.paragraphs:
         text = para.text.strip()
-
         if "<canvas_page>" in text.lower():
             inside_block = True
             current_block = [text]
             continue
-
         if "</canvas_page>" in text.lower():
             current_block.append(text)
             pages.append("\n".join(current_block))
             inside_block = False
             continue
-
         if inside_block:
             current_block.append(text)
 
@@ -78,6 +75,20 @@ def create_page(domain, course_id, title, html_body, token):
     response = requests.post(url, headers=headers, json=payload)
     return response.json().get("url") if response.status_code in (200, 201) else None
 
+def add_to_module(domain, course_id, module_id, item_type, item_url, title, token):
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"https://{domain}/api/v1/courses/{course_id}/modules/{module_id}/items"
+    payload = {
+        "module_item": {
+            "type": "Page",
+            "page_url": item_url,
+            "title": title,
+            "published": True
+        }
+    }
+    response = requests.post(url, headers=headers, json=payload)
+    return response.status_code in (200, 201)
+
 def load_docx_text(file):
     doc = Document(file)
     return "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
@@ -100,12 +111,13 @@ if uploaded_file and template_file and canvas_domain and course_id and canvas_to
         page_title = extract_tag("page_title", block) or f"Page {i+1}"
         module_name = extract_tag("module_name", block)
 
+        # fallback: search h1 inside the block
         if not module_name:
-            for para in doc_obj.paragraphs:
-                if para.style.name == "Heading 1" and para.text.strip():
-                    module_name = para.text.strip()
-                    st.info(f"📘 Using Heading 1 as module name: '{module_name}'")
-                    break
+            h1_match = re.search(r"<h1>(.*?)</h1>", block, flags=re.IGNORECASE)
+            if h1_match:
+                module_name = h1_match.group(1).strip()
+                st.info(f"📘 Using <h1> as module name: '{module_name}'")
+
         if not module_name:
             module_name = "General"
             st.warning(f"⚠️ No <module_name> tag or Heading 1 found for page {page_title}. Using default 'General'.")
@@ -176,19 +188,18 @@ Return:
             html_result = st.session_state.gpt_results[cache_key]["html"]
             quiz_json = st.session_state.gpt_results[cache_key]["quiz_json"]
 
-        st.markdown(f"### 📄 {page_title} ({page_type}) in module: {module_name}")
-        st.code(html_result, language="html")
+        with st.expander(f"📄 {page_title} ({page_type}) | Module: {module_name}", expanded=True):
+            st.code(html_result, language="html")
 
-        # Upload if bulk_upload or submit pressed
-        if bulk_upload or st.form_submit_button(f"🚀 Upload '{page_title}'", key=f"form_{i}"):
-            mid = get_or_create_module(module_name, canvas_domain, course_id, canvas_token, module_cache)
-            if not mid:
-                continue
-            if dry_run:
-                st.info(f"[Dry Run] Skipped upload of '{page_title}'")
-                continue
-
-            if page_type == "page":
-                page_url = create_page(canvas_domain, course_id, page_title, html_result, canvas_token)
-                if page_url and add_to_module(canvas_domain, course_id, mid, "Page", page_url, page_title, canvas_token):
-                    st.success(f"✅ Page '{page_title}' created and added to '{module_name}'")
+            if bulk_upload or dry_run:
+                st.info("Dry run or bulk mode – skipping form button.")
+            else:
+                with st.form(f"upload_form_{i}"):
+                    if st.form_submit_button(f"🚀 Upload '{page_title}'"):
+                        mid = get_or_create_module(module_name, canvas_domain, course_id, canvas_token, module_cache)
+                        if not mid:
+                            st.stop()
+                        if page_type == "page":
+                            page_url = create_page(canvas_domain, course_id, page_title, html_result, canvas_token)
+                            if page_url and add_to_module(canvas_domain, course_id, mid, "Page", page_url, page_title, canvas_token):
+                                st.success(f"✅ Page '{page_title}' created and added to '{module_name}'")
