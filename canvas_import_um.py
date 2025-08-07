@@ -23,7 +23,9 @@ if dry_run:
 def extract_canvas_pages(docx_file):
     doc = Document(docx_file)
     full_text = '\n'.join([para.text for para in doc.paragraphs])
-    return re.findall(r"<canvas_page>(.*?)</canvas_page>", full_text, re.DOTALL | re.IGNORECASE)
+    matches = re.findall(r"<canvas_page>(.*?)</canvas_page>", full_text, re.DOTALL | re.IGNORECASE)
+    st.info(f"✅ Found {len(matches)} <canvas_page> block(s).")
+    return matches
 
 def extract_tag(tag, block):
     match = re.search(fr"<{tag}>(.*?)</{tag}>", block, flags=re.DOTALL | re.IGNORECASE)
@@ -123,14 +125,14 @@ Return:
 1. HTML content for the page (no ```html tags)
 2. If page_type is quiz, also return structured JSON after a blank line, for example:
 
-    {
+    {{
       "quiz_description": "<html description>",
       "questions": [
-        {"question_name": "...", "question_text": "...", "answers": [
-          {"text": "...", "is_correct": true}
-        ]}
+        {{"question_name": "...", "question_text": "...", "answers": [
+          {{"text": "...", "is_correct": true}}
+        ]}}
       ]
-    }
+    }}
 """
         user_prompt = block
 
@@ -143,7 +145,19 @@ Return:
                 ],
                 temperature=0.3
             )
-            html_result = response.choices[0].message.content.strip()
+            raw = response.choices[0].message.content.strip()
+            cleaned = re.sub(r"```(html|json)?", "", raw, flags=re.IGNORECASE).strip()
+            match = re.search(r"({[\s\S]+})$", cleaned)
+            if match:
+                html_result = cleaned[:match.start()].strip()
+                try:
+                    quiz_json = json.loads(match.group(1))
+                except Exception as e:
+                    quiz_json = None
+                    st.error(f"❌ Quiz JSON parsing failed: {e}")
+            else:
+                html_result = cleaned
+                quiz_json = None
 
         st.markdown(f"### 📄 {page_title} ({page_type}) in module: {module_name}")
         st.code(html_result, language="html")
@@ -175,25 +189,21 @@ Return:
 
                 elif page_type == "quiz":
                     try:
-                        # Extract JSON block after blank line
-                        parts = html_result.split('\n\n')
-                        json_str = parts[-1]
-                        quiz_json = json.loads(json_str)
+                        if not quiz_json:
+                            raise ValueError("No quiz JSON detected")
                         description = quiz_json.get("quiz_description", "")
-                        # Create quiz
                         url = f"https://{canvas_domain}/api/v1/courses/{course_id}/quizzes"
                         headers = {"Authorization": f"Bearer {canvas_token}", "Content-Type": "application/json"}
                         payload = {"quiz": {"title": page_title, "description": description, "published": True, "quiz_type": "assignment"}}
                         resp = requests.post(url, headers=headers, json=payload)
                         if resp.status_code in (200, 201):
                             qid = resp.json().get("id")
-                            # Add questions
                             for q in quiz_json.get("questions", []):
                                 q_url = f"https://{canvas_domain}/api/v1/courses/{course_id}/quizzes/{qid}/questions"
                                 q_payload = {
                                     "question": {
-                                        "question_name": q.get("question_name","Q"),
-                                        "question_text": q.get("question_text",""),
+                                        "question_name": q.get("question_name", "Q"),
+                                        "question_text": q.get("question_text", ""),
                                         "question_type": "multiple_choice_question",
                                         "points_possible": 1,
                                         "answers": [
