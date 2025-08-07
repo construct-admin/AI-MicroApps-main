@@ -3,6 +3,7 @@ from docx import Document
 from openai import OpenAI
 import requests
 import re
+import json
 
 st.set_page_config(page_title="📄 DOCX → GPT → Canvas (Multi-Page)", layout="centered")
 st.title("📄 Upload DOCX → Convert via GPT → Upload to Canvas")
@@ -114,27 +115,23 @@ TAGS YOU WILL SEE:
 <page_title> = title of the page
 <module_name> = name of the module
 <quiz_title> = title of the quiz
-<question> = question block. These get sent to Canvas as quiz questions.
+<question> = question block.
 <multiple_choice> = multiple choice question
 * before a choice = correct answer
 
 Return:
 1. HTML content for the page (no ```html tags)
-2. If page_type is quiz, also return structured JSON like:
+2. If page_type is quiz, also return structured JSON after a blank line, for example:
 
-```
-{
-  "quiz_description": "<html description>",
-  "questions": [
-    {"question_name": "...", "question_text": "...", "answers": [
-      {"text": "...", "is_correct": true}, ...
-    ]},
-    ...
-  ]
-}
-```
+    {
+      "quiz_description": "<html description>",
+      "questions": [
+        {"question_name": "...", "question_text": "...", "answers": [
+          {"text": "...", "is_correct": true}
+        ]}
+      ]
+    }
 """
-
         user_prompt = block
 
         with st.spinner(f"🤖 Converting page {i+1} [{page_title}] via GPT..."):
@@ -178,26 +175,30 @@ Return:
 
                 elif page_type == "quiz":
                     try:
-                        split_result = html_result.split("\n\n")
-                        quiz_json = eval(split_result[-1].strip())
-                        description = quiz_json["quiz_description"]
+                        # Extract JSON block after blank line
+                        parts = html_result.split('\n\n')
+                        json_str = parts[-1]
+                        quiz_json = json.loads(json_str)
+                        description = quiz_json.get("quiz_description", "")
+                        # Create quiz
                         url = f"https://{canvas_domain}/api/v1/courses/{course_id}/quizzes"
                         headers = {"Authorization": f"Bearer {canvas_token}", "Content-Type": "application/json"}
                         payload = {"quiz": {"title": page_title, "description": description, "published": True, "quiz_type": "assignment"}}
                         resp = requests.post(url, headers=headers, json=payload)
                         if resp.status_code in (200, 201):
                             qid = resp.json().get("id")
-                            for q in quiz_json["questions"]:
+                            # Add questions
+                            for q in quiz_json.get("questions", []):
                                 q_url = f"https://{canvas_domain}/api/v1/courses/{course_id}/quizzes/{qid}/questions"
                                 q_payload = {
                                     "question": {
-                                        "question_name": q["question_name"],
-                                        "question_text": q["question_text"],
+                                        "question_name": q.get("question_name","Q"),
+                                        "question_text": q.get("question_text",""),
                                         "question_type": "multiple_choice_question",
                                         "points_possible": 1,
                                         "answers": [
-                                            {"text": ans["text"], "weight": 100 if ans["is_correct"] else 0}
-                                            for ans in q["answers"]
+                                            {"text": ans.get("text"), "weight": 100 if ans.get("is_correct") else 0}
+                                            for ans in q.get("answers", [])
                                         ]
                                     }
                                 }
