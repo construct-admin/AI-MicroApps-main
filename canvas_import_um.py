@@ -151,6 +151,7 @@ TAGS YOU WILL SEE:
 <module_name> = name of the module
 <quiz_title> = title of the quiz
 <question> = question block.
+<quiz_start> = start of quiz questions to be imported
 <multiple_choice> = multiple choice question
 * before a choice = correct answer
 
