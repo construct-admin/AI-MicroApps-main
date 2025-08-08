@@ -146,6 +146,7 @@ TAGS YOU WILL SEE:
 <canvas_page> = start of Canvas page
 </canvas_page> = end of Canvas page
 <page_type> = Canvas page type
+<template_type> = type of template to use for the page
 <page_title> = title of the page
 <module_name> = name of the module
 <quiz_title> = title of the quiz
