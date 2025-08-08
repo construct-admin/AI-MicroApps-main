@@ -457,6 +457,40 @@ if st.session_state.pages:
 You are an expert Canvas HTML generator.
 Below is a set of uMich Canvas LMS HTML templates and components; match them to the storyboard tags.
 
+You are an expert Canvas HTML generator.
+Below is a set of uMich Canvas LMS HTML templates followed by a storyboard page using tags.
+
+Match the tags to the templates and convert the storyboard content to styled HTML for Canvas.
+
+TEMPLATES:
+{template_text}
+
+TAGS YOU WILL SEE:
+<canvas_page> = start of Canvas page
+</canvas_page> = end of Canvas page
+<page_type> = Canvas page type
+<template_type> = type of template to use for the page
+<page_title> = title of the page
+<module_name> = name of the module
+<quiz_title> = title of the quiz
+<question> = question block.
+<quiz_start> = start of quiz questions to be imported
+<multiple_choice> = multiple choice question
+* before a choice = correct answer
+
+Return:
+1. HTML content for the page (no ```html tags)
+2. If page_type is quiz, also return structured JSON after a blank line, for example:
+
+    {{
+      "quiz_description": "<html description>",
+      "questions": [
+        {{"question_name": "...", "question_text": "...", "answers": [
+          {{"text": "...", "is_correct": true}}
+        ]}}
+      ]
+    }}
+    
 TEMPLATE PAGES (keys → html):
 {json.dumps({k: (template_pages[k][:400] + ' ... [truncated]') for k in list(template_pages.keys())[:30]}, ensure_ascii=False)}
 
