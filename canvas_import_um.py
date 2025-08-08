@@ -199,26 +199,42 @@ Return the page HTML and JSON quiz data if quiz."""
             html_result = st.session_state.gpt_results[cache_key]["html"]
             quiz_json = st.session_state.gpt_results[cache_key]["quiz_json"]
 
-        with st.expander(f"📄 {page_title} ({page_type}) | Module: {module_name}", expanded=True):
-            st.code(html_result, language="html")
-            if not dry_run:
-                if st.button(f"🚀 Upload '{page_title}'", key=f"btn_{i}"):
-                    mid = get_or_create_module(module_name, canvas_domain, course_id, canvas_token, module_cache)
-                    if page_type == "page":
-                        url = create_page(canvas_domain, course_id, page_title, html_result, canvas_token)
-                        add_to_module(canvas_domain, course_id, mid, "Page", url, page_title, canvas_token)
-                    elif page_type == "assignment":
-                        aid = create_assignment(canvas_domain, course_id, page_title, html_result, canvas_token)
-                        add_to_module(canvas_domain, course_id, mid, "Assignment", aid, page_title, canvas_token)
-                    elif page_type == "discussion":
-                        did = create_discussion(canvas_domain, course_id, page_title, html_result, canvas_token)
-                        add_to_module(canvas_domain, course_id, mid, "Discussion", did, page_title, canvas_token)
-                    elif page_type == "quiz" and quiz_json:
-                        qid = create_quiz(canvas_domain, course_id, page_title, html_result, quiz_json, canvas_token)
-                        add_to_module(canvas_domain, course_id, mid, "Quiz", qid, page_title, canvas_token)
-                    st.success(f"✅ Uploaded '{page_title}' to module '{module_name}'")
+    with st.expander(f"📄 {page_title} ({page_type}) | Module: {module_name}", expanded=True):
+        st.code(html_result, language="html")
 
-    if not dry_run and st.button("🚀 Upload ALL"):
+        # Always show the button; disable if Dry Run or missing Canvas creds
+        disabled_btn = (dry_run or not have_canvas)
+        upload_clicked = st.button(f"🚀 Upload '{page_title}'", key=f"btn_{i}", disabled=disabled_btn)
+
+        if upload_clicked:
+            mid = get_or_create_module(module_name, canvas_domain, course_id, canvas_token, module_cache)
+            if not mid:
+                st.error(f"❌ Could not create/find module '{module_name}'")
+                st.stop()
+
+            if page_type == "page":
+                url = create_page(canvas_domain, course_id, page_title, html_result, canvas_token)
+                ok = url and add_to_module(canvas_domain, course_id, mid, "Page", url, page_title, canvas_token)
+
+            elif page_type == "assignment":
+                aid = create_assignment(canvas_domain, course_id, page_title, html_result, canvas_token)
+                ok = aid and add_to_module(canvas_domain, course_id, mid, "Assignment", aid, page_title, canvas_token)
+
+            elif page_type == "discussion":
+                did = create_discussion(canvas_domain, course_id, page_title, html_result, canvas_token)
+                ok = did and add_to_module(canvas_domain, course_id, mid, "Discussion", did, page_title, canvas_token)
+
+            elif page_type == "quiz" and quiz_json:
+                qid = create_quiz(canvas_domain, course_id, page_title, html_result, quiz_json, canvas_token)
+                ok = qid and add_to_module(canvas_domain, course_id, mid, "Quiz", qid, page_title, canvas_token)
+            else:
+                ok = False
+
+            st.success(f"✅ Uploaded '{page_title}' to module '{module_name}'") if ok else st.error("❌ Upload failed.")
+
+    disabled_all = (dry_run or not have_canvas)
+    if st.button("🚀 Upload ALL", disabled=disabled_all):
+
         for i, block in enumerate(pages):
             page_type = extract_tag("page_type", block).lower() or "page"
             page_title = extract_tag("page_title", block) or f"Page {i+1}"
