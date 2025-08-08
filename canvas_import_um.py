@@ -1,4 +1,3 @@
-
 import streamlit as st
 from docx import Document
 from openai import OpenAI
@@ -6,9 +5,8 @@ import requests
 import re
 import json
 
-# --- Streamlit Page Config ---
-st.set_page_config(page_title="📄 DOCX → GPT → Canvas (All Content Types)", layout="wide")
-st.title("📄 DOCX → GPT → Canvas Uploader (Pages, Quizzes, Assignments, Discussions)")
+st.set_page_config(page_title="📄 DOCX → GPT → Canvas (Multi-Page)", layout="centered")
+st.title("📄 Upload DOCX → Convert via GPT → Upload to Canvas")
 
 # --- Inputs ---
 uploaded_file = st.file_uploader("Upload your storyboard (.docx)", type="docx")
@@ -18,15 +16,11 @@ course_id = st.text_input("Canvas Course ID")
 canvas_token = st.text_input("Canvas API Token", type="password")
 openai_api_key = st.text_input("OpenAI API Key", type="password")
 dry_run = st.checkbox("🔍 Preview only (Dry Run)")
-bulk_upload = st.checkbox("📄 Upload all pages automatically (no buttons)", value=False)
 
 if dry_run:
     st.info("No data will be sent to Canvas. This is a preview only.")
 
 # --- Helper Functions ---
-def normalize_base(domain):
-    return domain.replace("https://", "").replace("http://", "").strip("/")
-
 def extract_canvas_pages(docx_file):
     doc = Document(docx_file)
     pages = []
@@ -52,14 +46,10 @@ def extract_tag(tag, block):
     match = re.search(fr"<{tag}>(.*?)</{tag}>", block, flags=re.DOTALL | re.IGNORECASE)
     return match.group(1).strip() if match else ""
 
-def load_docx_text(file):
-    doc = Document(file)
-    return "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-
 def get_or_create_module(module_name, domain, course_id, token, module_cache):
     if module_name in module_cache:
         return module_cache[module_name]
-    url = f"https://{normalize_base(domain)}/api/v1/courses/{course_id}/modules"
+    url = f"https://{domain}/api/v1/courses/{course_id}/modules"
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(url, headers=headers)
     if resp.status_code == 200:
@@ -73,86 +63,34 @@ def get_or_create_module(module_name, domain, course_id, token, module_cache):
         module_cache[module_name] = mid
         return mid
     else:
-        st.error(f"❌ Failed to create/find module: {module_name} — {resp.text}")
+        st.error(f"❌ Failed to create/find module: {module_name}")
+        st.error(f"📬 Response: {resp.status_code} | {resp.text}")
         return None
 
 def create_page(domain, course_id, title, html_body, token):
-    url = f"https://{normalize_base(domain)}/api/v1/courses/{course_id}/pages"
-    headers = {"Authorization": f"Bearer {token}"}
-    payload = {"wiki_page": {"title": title[:250], "body": html_body, "published": True}}
-    r = requests.post(url, headers=headers, json=payload)
-    return r.json().get("url") if r.status_code in (200, 201) else None
+    url = f"https://{domain}/api/v1/courses/{course_id}/pages"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {"wiki_page": {"title": title, "body": html_body, "published": True}}
+    response = requests.post(url, headers=headers, json=payload)
+    return response.json().get("url") if response.status_code in (200, 201) else None
 
-def create_assignment(domain, course_id, title, html_body, token, points=10):
-    url = f"https://{normalize_base(domain)}/api/v1/courses/{course_id}/assignments"
+def add_to_module(domain, course_id, module_id, item_url, title, token):
     headers = {"Authorization": f"Bearer {token}"}
-    payload = {
-        "assignment": {
-            "name": title[:250],
-            "description": html_body,
-            "points_possible": points,
-            "submission_types": ["online_upload"],
-            "published": True
-        }
-    }
-    r = requests.post(url, headers=headers, json=payload)
-    return r.json().get("id") if r.status_code in (200, 201) else None
+    url = f"https://{domain}/api/v1/courses/{course_id}/modules/{module_id}/items"
+    payload = {"module_item": {"type": "Page", "page_url": item_url, "title": title, "published": True}}
+    response = requests.post(url, headers=headers, json=payload)
+    return response.status_code in (200, 201)
 
-def create_discussion(domain, course_id, title, html_body, token):
-    url = f"https://{normalize_base(domain)}/api/v1/courses/{course_id}/discussion_topics"
-    headers = {"Authorization": f"Bearer {token}"}
-    payload = {"title": title[:250], "message": html_body, "published": True}
-    r = requests.post(url, headers=headers, json=payload)
-    return r.json().get("id") if r.status_code in (200, 201) else None
+def load_docx_text(file):
+    doc = Document(file)
+    return "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
 
-def create_quiz(domain, course_id, title, description, quiz_json, token):
-    quiz_url = f"https://{normalize_base(domain)}/api/v1/courses/{course_id}/quizzes"
-    headers = {"Authorization": f"Bearer {token}"}
-    quiz_payload = {
-        "quiz": {
-            "title": title[:250],
-            "description": description,
-            "quiz_type": "assignment",
-            "published": True
-        }
-    }
-    quiz_resp = requests.post(quiz_url, headers=headers, json=quiz_payload)
-    if quiz_resp.status_code not in (200, 201):
-        st.error(f"❌ Quiz creation failed: {quiz_resp.text}")
-        return None
-    quiz_id = quiz_resp.json().get("id")
-    for q in quiz_json.get("questions", []):
-        q_url = f"{quiz_url}/{quiz_id}/questions"
-        q_payload = {
-            "question": {
-                "question_name": q.get("question_name"),
-                "question_text": q.get("question_text"),
-                "question_type": "multiple_choice_question",
-                "points_possible": 1,
-                "answers": [
-                    {"text": a.get("text"), "weight": 100 if a.get("is_correct") else 0}
-                    for a in q.get("answers", [])
-                ]
-            }
-        }
-        requests.post(q_url, headers=headers, json=q_payload)
-    return quiz_id
-
-def add_to_module(domain, course_id, module_id, item_type, item_id_or_url, title, token):
-    url = f"https://{normalize_base(domain)}/api/v1/courses/{course_id}/modules/{module_id}/items"
-    headers = {"Authorization": f"Bearer {token}"}
-    payload = {"module_item": {"type": item_type, "title": title[:250], "published": True}}
-    if item_type == "Page":
-        payload["module_item"]["page_url"] = item_id_or_url
-    else:
-        payload["module_item"]["content_id"] = item_id_or_url
-    r = requests.post(url, headers=headers, json=payload)
-    return r.status_code in (200, 201)
-
-# --- Main ---
+# --- Main Logic ---
 if uploaded_file and template_file and canvas_domain and course_id and canvas_token and openai_api_key:
+    # Cache GPT results so clicking buttons doesn't recompute
     if "gpt_results" not in st.session_state:
         st.session_state.gpt_results = {}
+
     pages = extract_canvas_pages(uploaded_file)
     template_text = load_docx_text(template_file)
     client = OpenAI(api_key=openai_api_key)
@@ -160,21 +98,75 @@ if uploaded_file and template_file and canvas_domain and course_id and canvas_to
     last_known_module_name = None
 
     st.subheader("Detected Pages")
+
+    # Global Upload All button
+    upload_all_clicked = st.button("🚀 Upload ALL pages", disabled=dry_run)
+    uploaded_any = False
+
     for i, block in enumerate(pages):
+        block = block.strip()
         page_type = extract_tag("page_type", block).lower() or "page"
         page_title = extract_tag("page_title", block) or f"Page {i+1}"
-        module_name = extract_tag("module_name", block) or last_known_module_name or "General"
-        last_known_module_name = module_name
+        module_name = extract_tag("module_name", block)
+
+        # Fallbacks for module name
+        if not module_name:
+            h1_match = re.search(r"<h1>(.*?)</h1>", block, flags=re.IGNORECASE)
+            if h1_match:
+                module_name = h1_match.group(1).strip()
+                st.info(f"📘 Using <h1> as module name: '{module_name}'")
+        if not module_name:
+            title_match = re.search(r"\d+\.\d+\s+(Module\s+[\w\s]+)", page_title, flags=re.IGNORECASE)
+            if title_match:
+                module_name = title_match.group(1).strip()
+                st.info(f"📘 Extracted module name from title: '{module_name}'")
+        if not module_name:
+            if last_known_module_name:
+                module_name = last_known_module_name
+                st.info(f"📘 Using previously found module name: '{module_name}'")
+            else:
+                module_name = "General"
+                st.warning(f"⚠️ No <module_name> tag or Heading 1 found for page {page_title}. Using default 'General'.")
+        else:
+            last_known_module_name = module_name
 
         cache_key = f"{page_title}-{i}"
         if cache_key not in st.session_state.gpt_results:
-            with st.spinner(f"🤖 Processing page {i+1}: {page_title}"):
-                system_prompt = f"""You are an expert Canvas HTML generator.
-Below is a set of Canvas LMS HTML templates followed by a storyboard page.
+            with st.spinner(f"🤖 Converting page {i+1} [{page_title}] via GPT..."):
+                system_prompt = f"""
+You are an expert Canvas HTML generator.
+Below is a set of uMich Canvas LMS HTML templates followed by a storyboard page using tags.
+
+Match the tags to the templates and convert the storyboard content to styled HTML for Canvas.
+
 TEMPLATES:
 {template_text}
-Return the page HTML and JSON quiz data if quiz."""
-                resp = client.chat.completions.create(
+
+TAGS YOU WILL SEE:
+<canvas_page> = start of Canvas page
+</canvas_page> = end of Canvas page
+<page_type> = Canvas page type
+<page_title> = title of the page
+<module_name> = name of the module
+<quiz_title> = title of the quiz
+<question> = question block.
+<multiple_choice> = multiple choice question
+* before a choice = correct answer
+
+Return:
+1. HTML content for the page (no ```html tags)
+2. If page_type is quiz, also return structured JSON after a blank line, for example:
+
+    {{
+      "quiz_description": "<html description>",
+      "questions": [
+        {{"question_name": "...", "question_text": "...", "answers": [
+          {{"text": "...", "is_correct": true}}
+        ]}}
+      ]
+    }}
+"""
+                response = client.chat.completions.create(
                     model="gpt-4o",
                     messages=[
                         {"role": "system", "content": system_prompt},
@@ -182,76 +174,58 @@ Return the page HTML and JSON quiz data if quiz."""
                     ],
                     temperature=0.3
                 )
-                raw = resp.choices[0].message.content.strip()
+                raw = response.choices[0].message.content.strip()
                 cleaned = re.sub(r"```(html|json)?", "", raw, flags=re.IGNORECASE).strip()
                 match = re.search(r"({[\s\S]+})$", cleaned)
                 if match:
                     html_result = cleaned[:match.start()].strip()
                     try:
                         quiz_json = json.loads(match.group(1))
-                    except:
+                    except Exception as e:
                         quiz_json = None
+                        st.error(f"❌ Quiz JSON parsing failed: {e}")
                 else:
                     html_result = cleaned
                     quiz_json = None
-                st.session_state.gpt_results[cache_key] = {"html": html_result, "quiz_json": quiz_json}
+
+                st.session_state.gpt_results[cache_key] = {
+                    "html": html_result,
+                    "quiz_json": quiz_json,
+                    "meta": {"page_type": page_type, "page_title": page_title, "module_name": module_name}
+                }
         else:
             html_result = st.session_state.gpt_results[cache_key]["html"]
             quiz_json = st.session_state.gpt_results[cache_key]["quiz_json"]
 
-    with st.expander(f"📄 {page_title} ({page_type}) | Module: {module_name}", expanded=True):
-        st.code(html_result, language="html")
+        with st.expander(f"📄 {page_title} ({page_type}) | Module: {module_name}", expanded=True):
+            st.code(html_result, language="html")
+            # Per-page upload button (no forms inside expander)
+            if not dry_run and st.button(f"🚀 Upload '{page_title}'", key=f"upload_{i}"):
+                mid = get_or_create_module(module_name, canvas_domain, course_id, canvas_token, module_cache)
+                if mid:
+                    if page_type == "page":
+                        page_url = create_page(canvas_domain, course_id, page_title, html_result, canvas_token)
+                        if page_url and add_to_module(canvas_domain, course_id, mid, page_url, page_title, canvas_token):
+                            st.success(f"✅ Page '{page_title}' created and added to '{module_name}'")
+                            uploaded_any = True
+                        else:
+                            st.error("❌ Upload failed.")
+                    else:
+                        st.warning("Only 'page' uploads are implemented in this version.")
+                else:
+                    st.error("❌ Module creation failed.")
 
-        # Always show the button; disable if Dry Run or missing Canvas creds
-        disabled_btn = (dry_run or not have_canvas)
-        upload_clicked = st.button(f"🚀 Upload '{page_title}'", key=f"btn_{i}", disabled=disabled_btn)
-
-        if upload_clicked:
+        # Upload ALL handler
+        if upload_all_clicked and not dry_run:
             mid = get_or_create_module(module_name, canvas_domain, course_id, canvas_token, module_cache)
-            if not mid:
-                st.error(f"❌ Could not create/find module '{module_name}'")
-                st.stop()
-
-            if page_type == "page":
-                url = create_page(canvas_domain, course_id, page_title, html_result, canvas_token)
-                ok = url and add_to_module(canvas_domain, course_id, mid, "Page", url, page_title, canvas_token)
-
-            elif page_type == "assignment":
-                aid = create_assignment(canvas_domain, course_id, page_title, html_result, canvas_token)
-                ok = aid and add_to_module(canvas_domain, course_id, mid, "Assignment", aid, page_title, canvas_token)
-
-            elif page_type == "discussion":
-                did = create_discussion(canvas_domain, course_id, page_title, html_result, canvas_token)
-                ok = did and add_to_module(canvas_domain, course_id, mid, "Discussion", did, page_title, canvas_token)
-
-            elif page_type == "quiz" and quiz_json:
-                qid = create_quiz(canvas_domain, course_id, page_title, html_result, quiz_json, canvas_token)
-                ok = qid and add_to_module(canvas_domain, course_id, mid, "Quiz", qid, page_title, canvas_token)
+            if mid:
+                if page_type == "page":
+                    page_url = create_page(canvas_domain, course_id, page_title, html_result, canvas_token)
+                    if page_url and add_to_module(canvas_domain, course_id, mid, page_url, page_title, canvas_token):
+                        uploaded_any = True
+                        st.success(f"✅ (All) Page '{page_title}' added to '{module_name}'")
             else:
-                ok = False
+                st.error(f"❌ (All) Module creation failed for '{module_name}'")
 
-            st.success(f"✅ Uploaded '{page_title}' to module '{module_name}'") if ok else st.error("❌ Upload failed.")
-
-    disabled_all = (dry_run or not have_canvas)
-    if st.button("🚀 Upload ALL", disabled=disabled_all):
-
-        for i, block in enumerate(pages):
-            page_type = extract_tag("page_type", block).lower() or "page"
-            page_title = extract_tag("page_title", block) or f"Page {i+1}"
-            module_name = extract_tag("module_name", block) or "General"
-            html_result = st.session_state.gpt_results[f"{page_title}-{i}"]["html"]
-            quiz_json = st.session_state.gpt_results[f"{page_title}-{i}"]["quiz_json"]
-            mid = get_or_create_module(module_name, canvas_domain, course_id, canvas_token, module_cache)
-            if page_type == "page":
-                url = create_page(canvas_domain, course_id, page_title, html_result, canvas_token)
-                add_to_module(canvas_domain, course_id, mid, "Page", url, page_title, canvas_token)
-            elif page_type == "assignment":
-                aid = create_assignment(canvas_domain, course_id, page_title, html_result, canvas_token)
-                add_to_module(canvas_domain, course_id, mid, "Assignment", aid, page_title, canvas_token)
-            elif page_type == "discussion":
-                did = create_discussion(canvas_domain, course_id, page_title, html_result, canvas_token)
-                add_to_module(canvas_domain, course_id, mid, "Discussion", did, page_title, canvas_token)
-            elif page_type == "quiz" and quiz_json:
-                qid = create_quiz(canvas_domain, course_id, page_title, html_result, quiz_json, canvas_token)
-                add_to_module(canvas_domain, course_id, mid, "Quiz", qid, page_title, canvas_token)
-        st.success("✅ All pages uploaded")
+    if upload_all_clicked and not dry_run and not uploaded_any:
+        st.warning("No pages were uploaded. Check tokens/IDs and try again.")
