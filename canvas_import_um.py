@@ -480,6 +480,7 @@ QUIZ RULES:
   <feedback_neutral>...</feedback_neutral> -> feedback.neutral
   For per-answer feedback, allow '(feedback: ...)' after a choice line OR <feedback>A: ...</feedback>.
   Preserve HTML inside feedback blocks verbatim.
+  Links within the content should be linked out as is. 
 
 RETURN:
 1) HTML (no code fences)
