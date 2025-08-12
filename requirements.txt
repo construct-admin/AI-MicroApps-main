@@ -23,3 +23,5 @@ requests
 pillow
 pytesseract
 pysrt
+google-api-python-client
+google-auth

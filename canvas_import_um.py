@@ -4,38 +4,21 @@
 #
 # What this app does:
 # 1) Extracts <canvas_page> blocks from your storyboard .docx (no GPT yet).
-# 2) Extracts "template pages" and "components" from uMich_template_code.docx.
+# 2) Extracts "template pages" and "components" from uMich_template_code.docx (or Google Doc).
 # 3) Lets you review & edit page metadata (title/type/module/template).
 # 4) Only when you click "Visualize pages with GPT" does it convert to HTML.
 # 5) Lets you upload one page at a time OR "Upload ALL" to Canvas.
-#
-# Supported Canvas content types: Page, Assignment, Discussion, Quiz (MCQ)
-# Upload flow: Create/Find Module → Create content → Add module item
-#
-# Notes:
-# - Quiz questions are parsed from a JSON object that GPT appends at the END
-#   of the message. It should look like:
-#   {
-#     "quiz_description": "<html description>",
-#     "questions": [
-#       {"question_name": "Q1", "question_text": "Text", "answers":[
-#         {"text":"A", "is_correct": false}, {"text":"B", "is_correct": true}
-#       ]}
-#     ]
-#   }
-# - We look for the last {...} JSON block in the GPT response (safe fallback).
-# - We *don't* automatically re-run GPT when you change small things — that only
-#   happens when you click "Visualize pages with GPT".
 # -----------------------------------------------------------------------------
 
-
+from io import BytesIO
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
 import streamlit as st
 from docx import Document
 from openai import OpenAI
 import requests
 import re
 import json
-
 
 # ---------------------------- UI & State -------------------------------------
 st.set_page_config(page_title="📄 DOCX → GPT → Canvas (Multi-Page)", layout="wide")
@@ -50,43 +33,65 @@ if "gpt_results" not in st.session_state:
 if "visualized" not in st.session_state:
     st.session_state.visualized = False  # did we run GPT yet?
 
-
 # ------------------------ Inputs / Credentials -------------------------------
 with st.sidebar:
     st.header("Setup")
-    uploaded_file = st.file_uploader("Storyboard (.docx)", type="docx")
-    template_file = st.file_uploader("uMich Template Code (.docx)", type="docx")
 
+    # Storyboard sources
+    uploaded_file = st.file_uploader("Storyboard (.docx)", type="docx")
+    st.subheader("Pull Storyboard from Google Docs")
+    gdoc_url = st.text_input("Google Doc URL (share with the Service Account)")
+    sa_json = st.file_uploader("Service Account JSON (for Drive read)", type=["json"])
+
+    # Template sources
+    template_file = st.file_uploader("uMich Template Code (.docx)", type="docx")
+    gdoc_url_template = st.text_input("Template Google Doc URL (optional)")
+
+    # Canvas + OpenAI
     canvas_domain = st.text_input("Canvas Base URL", placeholder="canvas.instructure.com")
     course_id = st.text_input("Canvas Course ID")
     canvas_token = st.text_input("Canvas API Token", type="password")
     openai_api_key = st.text_input("OpenAI API Key", type="password")
 
+    # Mode
     dry_run = st.checkbox("🔍 Preview only (Dry Run)", value=False)
     if dry_run:
         st.info("No data will be sent to Canvas. This is a preview only.", icon="ℹ️")
+
+# ------------------------- Google Drive Helpers ------------------------------
+def _gdoc_id_from_url(url: str):
+    if not url:
+        return None
+    m = re.search(r"/d/([a-zA-Z0-9_-]+)", url)
+    if m:
+        return m.group(1)
+    m = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", url)
+    return m.group(1) if m else None
+
+def fetch_docx_from_gdoc(file_id: str, sa_json_bytes: bytes) -> BytesIO:
+    """Export a Google Doc to DOCX and return as BytesIO."""
+    creds = Credentials.from_service_account_info(
+        json.loads(sa_json_bytes.decode("utf-8")),
+        scopes=["https://www.googleapis.com/auth/drive.readonly"],
+    )
+    service = build("drive", "v3", credentials=creds)
+    data = service.files().export(
+        fileId=file_id,
+        mimeType="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ).execute()
+    return BytesIO(data)
 
 # ------------------------- Helper: Template Parser ---------------------------
 def extract_templates_and_components(template_docx_file):
     """
     Parse uMich_template_code.docx into two dictionaries:
-      - template_pages: e.g., {"Module Overview Page": "<div>...</div>", "Video Page": "<div>...</div>", ...}
+      - template_pages: e.g., {"Module Overview Page": "<div>...</div>", ...}
       - components:     e.g., {"Accordion A": "<div class='umich-accordion-a'>...</div>", ...}
-
-    Heuristics:
-    - Sections that start with '#.' are considered page templates (look at your doc).
-      We'll use the first <h2> (or line after header) as key if present, else the header text.
-    - Sections labeled '[TEMPLATE] Something' or 'TEMPLATE ELEMENT' become components.
     """
     doc = Document(template_docx_file)
-    # Join with newlines to keep simple. We’ll split on headings.
     lines = [p.text for p in doc.paragraphs]
-
-    # Collapse multiple blank lines to one (cleaner parsing)
     text = "\n".join([ln for ln in lines])
 
-    # Split roughly by big headers that look like '#.' or '[TEMPLATE]' or 'TEMPLATE ELEMENT'
-    # We'll capture headers to know the block type.
     blocks = re.split(r"(?=^#\.\s|\[TEMPLATE\]|\[TEMPLATE ELEMENT\])", text, flags=re.MULTILINE)
 
     template_pages = {}
@@ -96,56 +101,33 @@ def extract_templates_and_components(template_docx_file):
         b = block.strip()
         if not b:
             continue
-
-        # Identify header
         header_line = b.splitlines()[0].strip()
-
-        # Determine "type"
         is_page_template = header_line.startswith("#.")
         is_component = ("[TEMPLATE ELEMENT]" in header_line) or header_line.startswith("[TEMPLATE]")
 
-        # Key/name heuristics:
-        # For page templates, try to find a friendly name on the first <h2> line or header itself.
         if is_page_template:
-            # Find first <h2> content as template name if present
-            h2_match = re.search(r"<h2[^>]*>(.*?)<\/h2>", b, flags=re.IGNORECASE | re.DOTALL)
+            h2_match = re.search(r"<h2[^>]*>(.*?)</h2>", b, flags=re.IGNORECASE | re.DOTALL)
             if h2_match:
                 key = re.sub(r"\s+", " ", h2_match.group(1).strip())
             else:
                 key = re.sub(r"^#\.\s*", "", header_line).strip()
-            # Page HTML = everything after the header line (best effort)
-            html = b
-            template_pages[key] = html
-
+            template_pages[key] = b
         elif is_component:
-            # Component name is the header line (clean it up)
             key = re.sub(r"^\[TEMPLATE(?:\sELEMENT)?\]\s*", "", header_line).strip()
-            html = b
-            components[key] = html
-
+            components[key] = b
         else:
-            # Some templates in your doc also start with text like "Post-Course Survey"
-            # If it contains a full page structure (<div class="canvasPageCon">...), treat as page template
             if '<div class="canvasPageCon"' in b:
-                # Try to extract a name
-                h2_match = re.search(r"<h2[^>]*>(.*?)<\/h2>", b, flags=re.IGNORECASE | re.DOTALL)
-                if h2_match:
-                    key = re.sub(r"\s+", " ", h2_match.group(1).strip())
-                else:
-                    key = header_line
+                h2_match = re.search(r"<h2[^>]*>(.*?)</h2>", b, flags=re.IGNORECASE | re.DOTALL)
+                key = re.sub(r"\s+", " ", h2_match.group(1).strip()) if h2_match else header_line
                 template_pages[key] = b
             else:
-                # Or treat as component if smaller snippet
                 components[header_line] = b
 
-    # Normalize keys – allow simple lookups by a friendlier alias set
     normalized_pages = {}
     for k, v in template_pages.items():
         norm = k.lower()
         normalized_pages[k] = v
-        normalized_pages[norm] = v  # convenience
-
-        # Additional aliases you can expand:
+        normalized_pages[norm] = v
         if "overview" in norm:
             normalized_pages["module_overview"] = v
         if "video page" in norm:
@@ -166,7 +148,6 @@ def extract_templates_and_components(template_docx_file):
         norm = k.lower()
         normalized_components[k] = v
         normalized_components[norm] = v
-        # aliases (expand as needed)
         if "accordion" in norm:
             normalized_components["accordion"] = v
         if "call out" in norm or "callout" in norm:
@@ -176,17 +157,11 @@ def extract_templates_and_components(template_docx_file):
 
     return normalized_pages, normalized_components
 
-
 # -------------------------- Helper: Storyboard Parser ------------------------
 def extract_canvas_pages(storyboard_docx_file):
-    """
-    Pull out everything between <canvas_page>...</canvas_page>
-    Returns a list of raw blocks (strings).
-    """
+    """Pull out everything between <canvas_page>...</canvas_page>"""
     doc = Document(storyboard_docx_file)
-    pages = []
-    current_block = []
-    inside_block = False
+    pages, current_block, inside_block = [], [], False
     for para in doc.paragraphs:
         text = para.text.strip()
         low = text.lower()
@@ -203,15 +178,10 @@ def extract_canvas_pages(storyboard_docx_file):
             current_block.append(text)
     return pages
 
-
 def extract_tag(tag, block):
-    """
-    Safe text extraction for tags like <page_type> ... </page_type>.
-    Case-insensitive. Returns "" if not found.
-    """
+    """Safe text extraction for tags like <page_type>...</page_type> (case-insensitive)."""
     m = re.search(fr"<{tag}>(.*?)</{tag}>", block, flags=re.DOTALL | re.IGNORECASE)
     return m.group(1).strip() if m else ""
-
 
 # ------------------------------ Canvas API -----------------------------------
 def get_or_create_module(module_name, domain, course_id, token, module_cache):
@@ -220,7 +190,6 @@ def get_or_create_module(module_name, domain, course_id, token, module_cache):
     url = f"https://{domain}/api/v1/courses/{course_id}/modules"
     headers = {"Authorization": f"Bearer {token}"}
 
-    # Try to find existing
     resp = requests.get(url, headers=headers)
     if resp.status_code == 200:
         for m in resp.json():
@@ -228,7 +197,6 @@ def get_or_create_module(module_name, domain, course_id, token, module_cache):
                 module_cache[module_name] = m["id"]
                 return m["id"]
 
-    # Create if not found
     resp = requests.post(url, headers=headers, json={"module": {"name": module_name, "published": True}})
     if resp.status_code in (200, 201):
         mid = resp.json().get("id")
@@ -239,17 +207,15 @@ def get_or_create_module(module_name, domain, course_id, token, module_cache):
         st.error(f"📬 Response: {resp.status_code} | {resp.text}")
         return None
 
-
 def add_page(domain, course_id, title, html_body, token):
     url = f"https://{domain}/api/v1/courses/{course_id}/pages"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {"wiki_page": {"title": title, "body": html_body, "published": True}}
     resp = requests.post(url, headers=headers, json=payload)
     if resp.status_code in (200, 201):
-        return resp.json().get("url")  # page_url for module item
+        return resp.json().get("url")
     st.error(f"❌ Page create failed: {resp.text}")
     return None
-
 
 def add_assignment(domain, course_id, title, html_body, token):
     url = f"https://{domain}/api/v1/courses/{course_id}/assignments"
@@ -269,7 +235,6 @@ def add_assignment(domain, course_id, title, html_body, token):
     st.error(f"❌ Assignment create failed: {resp.text}")
     return None
 
-
 def add_discussion(domain, course_id, title, html_body, token):
     url = f"https://{domain}/api/v1/courses/{course_id}/discussion_topics"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -279,7 +244,6 @@ def add_discussion(domain, course_id, title, html_body, token):
         return resp.json().get("id")
     st.error(f"❌ Discussion create failed: {resp.text}")
     return None
-
 
 def add_quiz(domain, course_id, title, description_html, token):
     url = f"https://{domain}/api/v1/courses/{course_id}/quizzes"
@@ -299,20 +263,9 @@ def add_quiz(domain, course_id, title, description_html, token):
     st.error(f"❌ Quiz create failed: {resp.text}")
     return None
 
-
 def add_quiz_question(domain, course_id, quiz_id, q):
-    """
-    q format:
-    {
-      "question_name": "Q1",
-      "question_text": "Text",
-      "answers": [{"text":"A", "is_correct": false}, ...]
-    }
-    """
     url = f"https://{domain}/api/v1/courses/{course_id}/quizzes/{quiz_id}/questions"
     headers = {"Authorization": f"Bearer {canvas_token}", "Content-Type": "application/json"}
-
-    # Only MCQ implemented here by design
     question_payload = {
         "question": {
             "question_name": q.get("question_name") or "Question",
@@ -325,46 +278,69 @@ def add_quiz_question(domain, course_id, quiz_id, q):
             ]
         }
     }
-    requests.post(url, headers=headers, json=question_payload)  # No hard fail if a single item errors
-
+    requests.post(url, headers=headers, json=question_payload)
 
 def add_to_module(domain, course_id, module_id, item_type, ref, title, token):
-    """
-    Adds the created item into the module:
-      - For Page:     item_type="Page",     ref = page_url
-      - For Quiz:     item_type="Quiz",     ref = quiz_id
-      - For Assignment:item_type="Assignment", ref = assignment_id
-      - For Discussion:item_type="Discussion", ref = discussion_id
-    """
     url = f"https://{domain}/api/v1/courses/{course_id}/modules/{module_id}/items"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
     payload = {"module_item": {"title": title, "type": item_type, "published": True}}
-
     if item_type == "Page":
         payload["module_item"]["page_url"] = ref
     else:
         payload["module_item"]["content_id"] = ref
-
     resp = requests.post(url, headers=headers, json=payload)
     return resp.status_code in (200, 201)
-
 
 # ------------------------- Extraction / Preparation --------------------------
 col1, col2 = st.columns([1, 2])
 with col1:
-    if st.button("1️⃣ Parse storyboard & templates", type="primary", use_container_width=True,
-                 disabled=not (uploaded_file and template_file)):
+    # Enable when (storyboard upload OR gdoc_url+sa_json) AND (template upload OR template gdoc)
+    has_story = bool(uploaded_file or (gdoc_url and sa_json))
+    has_template = bool(template_file or (gdoc_url_template and sa_json))
+
+    if st.button(
+        "1️⃣ Parse storyboard & templates",
+        type="primary",
+        use_container_width=True,
+        disabled=not (has_story and has_template)
+    ):
         # Reset prior runs
         st.session_state.pages = []
         st.session_state.gpt_results.clear()
         st.session_state.visualized = False
 
-        # Extract pages first (no GPT yet)
-        raw_pages = extract_canvas_pages(uploaded_file)
+        # ----- Resolve storyboard source (file upload OR Google Doc) -----
+        story_source = uploaded_file
+        if not story_source and gdoc_url and sa_json:
+            fid = _gdoc_id_from_url(gdoc_url)
+            if fid:
+                try:
+                    story_source = fetch_docx_from_gdoc(fid, sa_json.read())
+                except Exception as e:
+                    st.error(f"❌ Could not fetch Google Doc (storyboard): {e}")
+
+        if not story_source:
+            st.error("Please upload a storyboard .docx OR provide a Google Doc URL + Service Account JSON.")
+            st.stop()
+
+        raw_pages = extract_canvas_pages(story_source)
+
+        # ----- Resolve template source (file upload OR Google Doc) -----
+        tmpl_source = template_file
+        if not tmpl_source and gdoc_url_template and sa_json:
+            fid_t = _gdoc_id_from_url(gdoc_url_template)
+            if fid_t:
+                try:
+                    tmpl_source = fetch_docx_from_gdoc(fid_t, sa_json.read())
+                except Exception as e:
+                    st.error(f"❌ Could not fetch Google Doc (template): {e}")
+
+        if not tmpl_source:
+            st.error("Please upload the uMich template .docx OR provide its Google Doc URL.")
+            st.stop()
 
         # Extract templates and components
-        template_pages, components = extract_templates_and_components(template_file)
+        template_pages, components = extract_templates_and_components(tmpl_source)
         st.session_state.templates = {"page": template_pages, "component": components}
 
         # Convert raw blocks → editable meta rows
@@ -374,14 +350,11 @@ with col1:
             page_title = extract_tag("page_title", block) or f"Page {idx+1}"
             module_name = extract_tag("module_name", block).strip()
 
-            # Fallbacks for module_name
             if not module_name:
-                # If storyboard includes <h1> at the top, use that as module name
                 h1 = re.search(r"<h1>(.*?)</h1>", block, flags=re.IGNORECASE | re.DOTALL)
                 if h1:
                     module_name = h1.group(1).strip()
             if not module_name:
-                # Derive from title like "3.0 Module Three Overview"
                 m = re.search(r"\b(Module\s+[A-Za-z0-9 ]+)", page_title, flags=re.IGNORECASE)
                 if m:
                     module_name = m.group(1).strip()
@@ -389,11 +362,11 @@ with col1:
                 module_name = last_known_module or "General"
             last_known_module = module_name
 
-            template_type = extract_tag("template_type", block).strip()  # optional tag in storyboard
+            template_type = extract_tag("template_type", block).strip()  # optional
 
             st.session_state.pages.append({
                 "index": idx,
-                "raw": block,                # untouched raw block for GPT
+                "raw": block,
                 "page_type": page_type,      # "page" | "assignment" | "discussion" | "quiz"
                 "page_title": page_title,
                 "module_name": module_name,
@@ -401,7 +374,6 @@ with col1:
             })
 
         st.success(f"✅ Parsed {len(st.session_state.pages)} page(s) and loaded templates/components.")
-
 
 with col2:
     st.write("")
@@ -450,72 +422,40 @@ if st.session_state.pages:
                 idx = p["index"]
                 raw_block = p["raw"]
 
-                # Build the system prompt from template dictionaries (compact)
-                # NOTE: We pass a compactified version to keep tokens low.
-                # You can further trim if needed.
                 system_prompt = f"""
-You are an expert Canvas HTML generator.
-Below is a set of uMich Canvas LMS HTML templates and components; match them to the storyboard tags.
-
 You are an expert Canvas HTML generator.
 Below is a set of uMich Canvas LMS HTML templates followed by a storyboard page using tags.
 
-Match the tags to the templates and convert the storyboard content to styled HTML for Canvas. For each pages that contain videos, make sure you use the corectly formatted page, for example, if a page has two videos, the template for two video pages must be used. 
-You can also gauge from the template type, what type of canvas content it is and send it to canvas using the appropriate UI. If you do not see any template tags then match the name from uMich code document to that in the storyboard and select the template type accordingly. 
-There is also an example image of how a page should look on each page. make sure that everything matches that format.
+Match the tags to the templates and convert the storyboard content to styled HTML for Canvas. If a page has two videos, choose the "two video" template; if three, choose the "three video" template, etc. Use template_type if provided; otherwise infer the best match by name/structure.
 
 TAGS YOU WILL SEE:
-<canvas_page> = start of Canvas page
-</canvas_page> = end of Canvas page
-<page_type> = Canvas page type
-<template_type> = type of template to use for the page
-<page_title> = title of the page
-<module_name> = name of the module
-<quiz_title> = title of the quiz
-<question> = question block of a question within a quiz.
-<quiz_start> = start of quiz questions to be imported
-<multiple_choice> = multiple choice question
-* before a choice = correct answer
+<canvas_page>, </canvas_page>
+<page_type> (page|assignment|discussion|quiz)
+<template_type>
+<page_title>
+<module_name>
+<quiz_title>
+<question> blocks inside quizzes
+<quiz_start> boundary for quiz questions
+<multiple_choice> uses "*" prefix for correct answers
 
 Return:
-1. HTML content for the page (no ```html tags)
-2. If page_type is quiz, also return structured JSON after a blank line, for example:
+1) HTML content for the page (no ``` fences)
+2) If page_type is "quiz", append a JSON object at the very END with:
+{{
+  "quiz_description": "<html description>",
+  "questions": [{{"question_name":"...", "question_text":"...", "answers":[{{"text":"...", "is_correct":true}}]}}]
+}}
 
-    {{
-      "quiz_description": "<html description>",
-      "questions": [
-        {{"question_name": "...", "question_text": "...", "answers": [
-          {{"text": "...", "is_correct": true}}
-        ]}}
-      ]
-    }}
-
-TEMPLATE PAGES (keys → html):
+TEMPLATE PAGES (keys → html, truncated):
 {json.dumps({k: (template_pages[k][:400] + ' ... [truncated]') for k in list(template_pages.keys())[:30]}, ensure_ascii=False)}
 
-COMPONENTS (keys → html):
+COMPONENTS (keys → html, truncated):
 {json.dumps({k: (components[k][:300] + ' ... [truncated]') for k in list(components.keys())[:30]}, ensure_ascii=False)}
-
-Storyboard tags:
-- <canvas_page> boundary mark
-- <page_type>, <page_title>, <module_name>, (optional) <template_type>
-- <question> blocks (for quizzes). '*' prefix marks correct answers.
-- Only return clean HTML for body (no ``` fences).
-- If page_type is "quiz", append a JSON object at the very END with quiz metadata:
-  {{
-    "quiz_description": "<html description>",
-    "questions": [
-      {{"question_name": "...", "question_text": "...",
-        "answers": [{{"text":"...", "is_correct":true}}, ...]
-      }}
-    ]
-  }}
 """
 
-                # User content:
-                # We pass the raw block *plus* the resolved template_type so the model can pick the right one.
                 user_prompt = f"""
-Use template_type="{p['template_type'] or 'auto'}" if it matches a known template page; otherwise choose best fit.
+Use template_type="{p['template_type'] or 'auto'}" if it matches a known template; otherwise choose best fit.
 
 Storyboard page block:
 {raw_block}
@@ -531,10 +471,8 @@ Storyboard page block:
                 )
 
                 raw = response.choices[0].message.content.strip()
-                # Strip code fences if any
                 cleaned = re.sub(r"```(html|json)?", "", raw, flags=re.IGNORECASE).strip()
 
-                # Pull the LAST {...} JSON block (quiz meta) if present
                 json_match = re.search(r"({[\s\S]+})\s*$", cleaned)
                 quiz_json = None
                 html_result = cleaned
@@ -543,13 +481,9 @@ Storyboard page block:
                         quiz_json = json.loads(json_match.group(1))
                         html_result = cleaned[:json_match.start()].strip()
                     except Exception:
-                        # Keep going with just HTML
                         quiz_json = None
 
-                st.session_state.gpt_results[idx] = {
-                    "html": html_result,
-                    "quiz_json": quiz_json
-                }
+                st.session_state.gpt_results[idx] = {"html": html_result, "quiz_json": quiz_json}
 
         st.session_state.visualized = True
         st.success("✅ Visualization complete. Preview below and upload when ready.")
@@ -561,26 +495,25 @@ if st.session_state.pages and st.session_state.visualized:
     module_cache = {}
     any_uploaded = False
 
-    # Global Upload ALL
     colA, colB = st.columns([1, 2])
     with colA:
-        upload_all_clicked = st.button("🚀 Upload ALL to Canvas", type="secondary",
-                                       disabled=dry_run or not (canvas_domain and course_id and canvas_token))
+        upload_all_clicked = st.button(
+            "🚀 Upload ALL to Canvas",
+            type="secondary",
+            disabled=dry_run or not (canvas_domain and course_id and canvas_token)
+        )
     with colB:
         if dry_run:
             st.info("Dry run is ON — uploads are disabled.", icon="⏸️")
 
-    # Iterate pages with per-page upload
     for p in st.session_state.pages:
         idx = p["index"]
         meta = f"{p['page_title']} ({p['page_type']}) | Module: {p['module_name']}"
         with st.expander(f"📄 {meta}", expanded=False):
             html_result = st.session_state.gpt_results.get(idx, {}).get("html", "")
             quiz_json = st.session_state.gpt_results.get(idx, {}).get("quiz_json")
-
             st.code(html_result or "[No HTML returned]", language="html")
 
-            # Per-page upload button
             can_upload = (not dry_run) and canvas_domain and course_id and canvas_token
             if st.button(f"Upload '{p['page_title']}'", key=f"upl_{idx}", disabled=not can_upload):
                 mid = get_or_create_module(p["module_name"], canvas_domain, course_id, canvas_token, module_cache)
@@ -607,18 +540,15 @@ if st.session_state.pages and st.session_state.visualized:
                         st.success("✅ Discussion created & added to module.")
 
                 elif p["page_type"] == "quiz":
-                    # Create quiz, then add questions
                     description = html_result
                     if quiz_json and isinstance(quiz_json, dict) and "quiz_description" in quiz_json:
                         description = quiz_json.get("quiz_description") or html_result
 
                     qid = add_quiz(canvas_domain, course_id, p["page_title"], description, canvas_token)
                     if qid:
-                        # Add questions (if any)
                         if quiz_json and isinstance(quiz_json, dict):
                             for q in quiz_json.get("questions", []):
                                 add_quiz_question(canvas_domain, course_id, qid, q)
-                        # Add to module
                         if add_to_module(canvas_domain, course_id, mid, "Quiz", qid, p["page_title"], canvas_token):
                             any_uploaded = True
                             st.success("✅ Quiz created (with questions) & added to module.")
@@ -628,9 +558,7 @@ if st.session_state.pages and st.session_state.visualized:
                 else:
                     st.warning(f"Unsupported page_type: {p['page_type']}")
 
-    # Handle Upload ALL
     if upload_all_clicked and (not dry_run):
-        template_pages = st.session_state.templates["page"]  # not used here, but left for parity
         for p in st.session_state.pages:
             idx = p["index"]
             html_result = st.session_state.gpt_results.get(idx, {}).get("html", "")
@@ -664,7 +592,6 @@ if st.session_state.pages and st.session_state.visualized:
 
                 qid = add_quiz(canvas_domain, course_id, p["page_title"], description, canvas_token)
                 if qid:
-                    # Add questions
                     if quiz_json and isinstance(quiz_json, dict):
                         for q in quiz_json.get("questions", []):
                             add_quiz_question(canvas_domain, course_id, qid, q)
@@ -675,11 +602,13 @@ if st.session_state.pages and st.session_state.visualized:
         if not any_uploaded:
             st.warning("No items uploaded. Check your tokens/IDs and try again.")
 
-
 # ----------------------------- UX Guidance -----------------------------------
-if not uploaded_file or not template_file:
-    st.info("Upload both the storyboard and template files in the sidebar, then click **Parse storyboard & templates**.", icon="📝")
-elif uploaded_file and template_file and not st.session_state.pages:
+has_story = bool(uploaded_file or (gdoc_url and sa_json))
+has_template = bool(template_file or (gdoc_url_template and sa_json))
+
+if not has_story or not has_template:
+    st.info("Provide a storyboard (.docx upload or Google Doc URL + SA JSON) and the template (.docx or Google Doc), then click **Parse storyboard & templates**.", icon="📝")
+elif has_story and has_template and not st.session_state.pages:
     st.warning("Click **Parse storyboard & templates** to begin (no GPT call yet).", icon="👉")
 elif st.session_state.pages and not st.session_state.visualized:
     st.info("Review & adjust page metadata above, then click **Visualize pages with GPT**.", icon="🔎")
