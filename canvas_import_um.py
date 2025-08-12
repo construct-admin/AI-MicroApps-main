@@ -468,6 +468,7 @@ if st.session_state.pages:
 You are an expert Canvas HTML generator.
 
 Match storyboard tags to uMich Canvas templates/components documents, then use the html from the document to create Canvas-ready HTML while keeping all html styling components in place.
+Keep all image and horizontal line code as is. It should translate to Canvas without changes.
 
 <canvas_page>, </canvas_page>
 <page_type> (page|assignment|discussion|quiz)
