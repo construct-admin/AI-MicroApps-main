@@ -505,13 +505,11 @@ RETURN:
   ]
 }}
 
-# AFTER
-TEMPLATE PAGES (keys → html):
-{json.dumps(template_pages, ensure_ascii=False)}
+TEMPLATE PAGES (keys → html, truncated):
+{json.dumps({k: (template_pages[k][:400] + ' ... [truncated]') for k in list(template_pages.keys())[:30]}, ensure_ascii=False)}
 
-COMPONENTS (keys → html):
-{json.dumps(components, ensure_ascii=False)}
-
+COMPONENTS (keys → html, truncated):
+{json.dumps({k: (components[k][:300] + ' ... [truncated]') for k in list(components.keys())[:30]}, ensure_ascii=False)}
 """
 
                 user_prompt = f"""
