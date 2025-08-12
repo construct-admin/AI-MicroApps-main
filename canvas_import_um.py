@@ -460,10 +460,8 @@ Below is a set of uMich Canvas LMS HTML templates and components; match them to 
 You are an expert Canvas HTML generator.
 Below is a set of uMich Canvas LMS HTML templates followed by a storyboard page using tags.
 
-Match the tags to the templates and convert the storyboard content to styled HTML for Canvas.
-
-TEMPLATES:
-{template_text}
+Match the tags to the templates and convert the storyboard content to styled HTML for Canvas. For each pages that contain videos, make sure you use the corectly formatted page, for example, if a page has two videos, the template for two video pages must be used. 
+If you find a horizontal rule or google doc horizontal line, it indicates a new page.
 
 TAGS YOU WILL SEE:
 <canvas_page> = start of Canvas page
@@ -473,7 +471,7 @@ TAGS YOU WILL SEE:
 <page_title> = title of the page
 <module_name> = name of the module
 <quiz_title> = title of the quiz
-<question> = question block.
+<question> = question block of a question within a quiz.
 <quiz_start> = start of quiz questions to be imported
 <multiple_choice> = multiple choice question
 * before a choice = correct answer
@@ -490,7 +488,7 @@ Return:
         ]}}
       ]
     }}
-    
+
 TEMPLATE PAGES (keys → html):
 {json.dumps({k: (template_pages[k][:400] + ' ... [truncated]') for k in list(template_pages.keys())[:30]}, ensure_ascii=False)}
 
