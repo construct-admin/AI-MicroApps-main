@@ -436,8 +436,12 @@ TAGS YOU WILL SEE:
 <module_name>
 <quiz_title>
 <question> blocks inside quizzes
-<quiz_start> boundary for quiz questions
+<quiz_start> beginning of quiz questions to be added as questions in the quiz on Canvas.
+</quiz_end> end of quiz questions to be added as questions in the quiz on Canvas.
 <multiple_choice> uses "*" prefix for correct answers
+<shuffle> indicates that answers should be shuffled in the question in the quiz
+<h5p> is the beginning of the h5p embed code and should be added as is to the HTML code. 
+</h5p> end of the h5p embed code
 
 Return:
 1) HTML content for the page (no ``` fences)
