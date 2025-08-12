@@ -468,6 +468,12 @@ if st.session_state.pages:
 You are an expert Canvas HTML generator.
 
 Match storyboard tags to uMich Canvas templates/components and output Canvas-ready HTML.
+
+<canvas_page>, </canvas_page>
+<page_type> (page|assignment|discussion|quiz)
+<template_type>
+<page_title>
+
 If the page is a quiz, ALSO output JSON (schema below) for MCQ items.
 
 QUIZ RULES:
