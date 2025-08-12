@@ -433,7 +433,7 @@ if st.session_state.pages:
 
         SYSTEM = (
             "You are an expert Canvas HTML generator.\n"
-            "Use the file_search tool to find the exact uMich template by name or structure.\n"
+            "Use the file_search tool to find the exact or closest uMich template by name or structure.\n"
             "STRICT TEMPLATE RULES:\n"
             "- Reproduce template HTML verbatim (do NOT change or remove elements, attributes, classes, data-*).\n"
             "- Preserve all <img> tags exactly (src, data-api-endpoint/returntype, width/height).\n"
