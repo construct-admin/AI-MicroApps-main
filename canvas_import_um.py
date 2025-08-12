@@ -3,14 +3,16 @@
 # 📄 DOCX → GPT → Canvas (Multi-Page)
 #
 # What this app does:
-# 1) Extracts <canvas_page> blocks from your storyboard .docx (no GPT yet).
+# 1) Extracts <canvas_page> blocks from your storyboard .docx (or Google Doc).
 # 2) Extracts "template pages" and "components" from uMich_template_code.docx (or Google Doc).
 # 3) Lets you review & edit page metadata (title/type/module/template).
 # 4) Only when you click "Visualize pages with GPT" does it convert to HTML.
 # 5) Lets you upload one page at a time OR "Upload ALL" to Canvas.
+# 6) Uses Canvas New Quizzes for quizzes and supports per-question shuffle.
 # -----------------------------------------------------------------------------
 
 from io import BytesIO
+import uuid
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 import streamlit as st
@@ -52,6 +54,9 @@ with st.sidebar:
     course_id = st.text_input("Canvas Course ID")
     canvas_token = st.text_input("Canvas API Token", type="password")
     openai_api_key = st.text_input("OpenAI API Key", type="password")
+
+    # Quiz engine toggle (default New Quizzes ON)
+    use_new_quizzes = st.checkbox("Use New Quizzes (recommended)", value=True)
 
     # Mode
     dry_run = st.checkbox("🔍 Preview only (Dry Run)", value=False)
@@ -183,7 +188,7 @@ def extract_tag(tag, block):
     m = re.search(fr"<{tag}>(.*?)</{tag}>", block, flags=re.DOTALL | re.IGNORECASE)
     return m.group(1).strip() if m else ""
 
-# ------------------------------ Canvas API -----------------------------------
+# ------------------------------ Canvas API (Classic) -------------------------
 def get_or_create_module(module_name, domain, course_id, token, module_cache):
     if module_name in module_cache:
         return module_cache[module_name]
@@ -245,6 +250,7 @@ def add_discussion(domain, course_id, title, html_body, token):
     st.error(f"❌ Discussion create failed: {resp.text}")
     return None
 
+# Classic quiz (kept as optional fallback)
 def add_quiz(domain, course_id, title, description_html, token):
     url = f"https://{domain}/api/v1/courses/{course_id}/quizzes"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -291,10 +297,101 @@ def add_to_module(domain, course_id, module_id, item_type, ref, title, token):
     resp = requests.post(url, headers=headers, json=payload)
     return resp.status_code in (200, 201)
 
+# ------------------------------ Canvas API (New Quizzes) ---------------------
+def add_new_quiz(domain, course_id, title, description_html, token, points_possible=1):
+    """
+    Create a New Quiz (LTI) and return its assignment_id.
+    """
+    url = f"https://{domain}/api/quiz/v1/courses/{course_id}/quizzes"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {
+        "quiz": {
+            "title": title,
+            "points_possible": max(points_possible, 1),
+            "instructions": description_html or ""
+        }
+    }
+    resp = requests.post(url, headers=headers, json=payload)
+    if resp.status_code in (200, 201):
+        data = resp.json()
+        return data.get("assignment_id") or data.get("id")
+    st.error(f"❌ New Quiz create failed: {resp.status_code} | {resp.text}")
+    return None
+
+def add_new_quiz_mcq(domain, course_id, assignment_id, q, token, position=1):
+    """
+    Create a Multiple Choice (choice) item in a New Quiz.
+
+    q format (extends your quiz_json):
+    {
+      "question_name": "Q1",
+      "question_text": "Text or HTML",
+      "answers": [{"text":"A","is_correct":false}, {"text":"B","is_correct":true}],
+      "shuffle": true     # optional; default False
+    }
+    """
+    url = f"https://{domain}/api/quiz/v1/courses/{course_id}/quizzes/{assignment_id}/items"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    # Build choices with UUIDs and 1-based positions
+    choices = []
+    correct_choice_id = None
+    for idx, ans in enumerate(q.get("answers", []), start=1):
+        cid = str(uuid.uuid4())
+        choices.append({
+            "id": cid,
+            "position": idx,
+            "itemBody": f"<p>{ans.get('text','')}</p>"
+        })
+        if ans.get("is_correct"):
+            correct_choice_id = cid
+
+    if not choices:
+        st.warning("Skipping MCQ with no answers.")
+        return
+    if not correct_choice_id:
+        # Fallback: first choice correct if none flagged
+        correct_choice_id = choices[0]["id"]
+
+    properties = {
+        "shuffleRules": {
+            "choices": {
+                "toLock": [],  # you could pass indexes to lock if you need
+                "shuffled": bool(q.get("shuffle", False))
+            }
+        },
+        "varyPointsByAnswer": False
+    }
+
+    item_payload = {
+        "item": {
+            "entry_type": "Item",
+            "points_possible": 1,
+            "position": position,
+            "entry": {
+                "interaction_type_slug": "choice",
+                "title": q.get("question_name") or "Question",
+                "item_body": q.get("question_text") or "",
+                "calculator_type": "none",
+                "interaction_data": {
+                    "choices": choices
+                },
+                "properties": properties,
+                "scoring_data": {
+                    "value": correct_choice_id
+                },
+                "scoring_algorithm": "Equivalence"
+            }
+        }
+    }
+
+    resp = requests.post(url, headers=headers, json=item_payload)
+    if resp.status_code not in (200, 201):
+        st.warning(f"⚠️ Failed to add item to New Quiz: {resp.status_code} | {resp.text}")
+
 # ------------------------- Extraction / Preparation --------------------------
 col1, col2 = st.columns([1, 2])
 with col1:
-    # Enable when (storyboard upload OR gdoc_url+sa_json) AND (template upload OR template gdoc)
     has_story = bool(uploaded_file or (gdoc_url and sa_json))
     has_template = bool(template_file or (gdoc_url_template and sa_json))
 
@@ -422,33 +519,35 @@ if st.session_state.pages:
                 idx = p["index"]
                 raw_block = p["raw"]
 
+                # --- System prompt (trimmed, with shuffle guidance) ---
                 system_prompt = f"""
 You are an expert Canvas HTML generator.
-Below is a set of uMich Canvas LMS HTML templates followed by a storyboard page using tags.
 
-Match the tags to the templates and convert the storyboard content to styled HTML for Canvas. If a page has two videos, choose the "two video" template; if three, choose the "three video" template, etc. Use template_type if provided; otherwise infer the best match by name/structure.
+Match storyboard tags to the provided uMich Canvas templates/components and output Canvas-ready HTML.
+If the page is a quiz, also output a JSON object (see schema) that lists MCQ questions.
 
-TAGS YOU WILL SEE:
-<canvas_page>, </canvas_page>
-<page_type> (page|assignment|discussion|quiz)
-<template_type>
-<page_title>
-<module_name>
-<quiz_title>
-<question> blocks inside quizzes
-<quiz_start> beginning of quiz questions to be added as questions in the quiz on Canvas.
-</quiz_end> end of quiz questions to be added as questions in the quiz on Canvas.
-<multiple_choice> uses "*" prefix for correct answers
-<shuffle> indicates that answers should be shuffled in the question in the quiz
-<h5p> is the beginning of the h5p embed code and should be added as is to the HTML code. 
-</h5p> end of the h5p embed code
+VIDEO TEMPLATES:
+- If a page has 2 videos, choose the "two video" template; 3 videos -> "three video" template, etc.
 
-Return:
-1) HTML content for the page (no ``` fences)
-2) If page_type is "quiz", append a JSON object at the very END with:
+QUIZ RULES:
+- Questions appear between <quiz_start> and </quiz_end>.
+- <multiple_choice> blocks use "*" prefix to mark the correct choice.
+- If <shuffle> appears inside a question block, set "shuffle": true for that question in JSON; else false.
+- Return JSON ONLY at the very end (after the HTML) and with no code fences.
+
+RETURN:
+1) HTML (no code fences)
+2) If page_type is "quiz", append JSON like:
 {{
   "quiz_description": "<html description>",
-  "questions": [{{"question_name":"...", "question_text":"...", "answers":[{{"text":"...", "is_correct":true}}]}}]
+  "questions": [
+    {{
+      "question_name": "Q1",
+      "question_text": "Text or HTML",
+      "answers": [{{"text":"A","is_correct":false}},{{"text":"B","is_correct":true}}],
+      "shuffle": true
+    }}
+  ]
 }}
 
 TEMPLATE PAGES (keys → html, truncated):
@@ -544,21 +643,36 @@ if st.session_state.pages and st.session_state.visualized:
                         st.success("✅ Discussion created & added to module.")
 
                 elif p["page_type"] == "quiz":
+                    # --- NEW vs CLASSIC ---
                     description = html_result
                     if quiz_json and isinstance(quiz_json, dict) and "quiz_description" in quiz_json:
                         description = quiz_json.get("quiz_description") or html_result
 
-                    qid = add_quiz(canvas_domain, course_id, p["page_title"], description, canvas_token)
-                    if qid:
-                        if quiz_json and isinstance(quiz_json, dict):
-                            for q in quiz_json.get("questions", []):
-                                add_quiz_question(canvas_domain, course_id, qid, q)
-                        if add_to_module(canvas_domain, course_id, mid, "Quiz", qid, p["page_title"], canvas_token):
-                            any_uploaded = True
-                            st.success("✅ Quiz created (with questions) & added to module.")
+                    if use_new_quizzes:
+                        # New Quiz: create, add MCQs (with shuffle), then add to module as Assignment
+                        assignment_id = add_new_quiz(canvas_domain, course_id, p["page_title"], description, canvas_token)
+                        if assignment_id:
+                            if quiz_json and isinstance(quiz_json, dict):
+                                for pos, q in enumerate(quiz_json.get("questions", []), start=1):
+                                    if q.get("answers"):
+                                        add_new_quiz_mcq(canvas_domain, course_id, assignment_id, q, canvas_token, position=pos)
+                            if add_to_module(canvas_domain, course_id, mid, "Assignment", assignment_id, p["page_title"], canvas_token):
+                                any_uploaded = True
+                                st.success("✅ New Quiz created (with items) & added to module.")
+                        else:
+                            st.error("❌ New Quiz creation failed.")
                     else:
-                        st.error("❌ Quiz creation failed.")
-
+                        # Classic fallback
+                        qid = add_quiz(canvas_domain, course_id, p["page_title"], description, canvas_token)
+                        if qid:
+                            if quiz_json and isinstance(quiz_json, dict):
+                                for q in quiz_json.get("questions", []):
+                                    add_quiz_question(canvas_domain, course_id, qid, q)
+                            if add_to_module(canvas_domain, course_id, mid, "Quiz", qid, p["page_title"], canvas_token):
+                                any_uploaded = True
+                                st.success("✅ Classic Quiz created (with questions) & added to module.")
+                        else:
+                            st.error("❌ Classic Quiz creation failed.")
                 else:
                     st.warning(f"Unsupported page_type: {p['page_type']}")
 
@@ -594,14 +708,25 @@ if st.session_state.pages and st.session_state.visualized:
                 if quiz_json and isinstance(quiz_json, dict) and "quiz_description" in quiz_json:
                     description = quiz_json.get("quiz_description") or html_result
 
-                qid = add_quiz(canvas_domain, course_id, p["page_title"], description, canvas_token)
-                if qid:
-                    if quiz_json and isinstance(quiz_json, dict):
-                        for q in quiz_json.get("questions", []):
-                            add_quiz_question(canvas_domain, course_id, qid, q)
-                    add_to_module(canvas_domain, course_id, mid, "Quiz", qid, p["page_title"], canvas_token)
-                    any_uploaded = True
-                    st.toast(f"Uploaded quiz: {p['page_title']}", icon="✅")
+                if use_new_quizzes:
+                    assignment_id = add_new_quiz(canvas_domain, course_id, p["page_title"], description, canvas_token)
+                    if assignment_id:
+                        if quiz_json and isinstance(quiz_json, dict):
+                            for pos, q in enumerate(quiz_json.get("questions", []), start=1):
+                                if q.get("answers"):
+                                    add_new_quiz_mcq(canvas_domain, course_id, assignment_id, q, canvas_token, position=pos)
+                        add_to_module(canvas_domain, course_id, mid, "Assignment", assignment_id, p["page_title"], canvas_token)
+                        any_uploaded = True
+                        st.toast(f"Uploaded New Quiz: {p['page_title']}", icon="✅")
+                else:
+                    qid = add_quiz(canvas_domain, course_id, p["page_title"], description, canvas_token)
+                    if qid:
+                        if quiz_json and isinstance(quiz_json, dict):
+                            for q in quiz_json.get("questions", []):
+                                add_quiz_question(canvas_domain, course_id, qid, q)
+                        add_to_module(canvas_domain, course_id, mid, "Quiz", qid, p["page_title"], canvas_token)
+                        any_uploaded = True
+                        st.toast(f"Uploaded Classic Quiz: {p['page_title']}", icon="✅")
 
         if not any_uploaded:
             st.warning("No items uploaded. Check your tokens/IDs and try again.")
@@ -611,7 +736,7 @@ has_story = bool(uploaded_file or (gdoc_url and sa_json))
 has_template = bool(template_file or (gdoc_url_template and sa_json))
 
 if not has_story or not has_template:
-    st.info("Provide a storyboard (.docx upload or Google Doc URL + SA JSON) and the template (.docx or Google Doc), then click **Parse storyboard & templates**.", icon="📝")
+    st.info("Provide a storyboard (.docx or Google Doc) and the template (.docx or Google Doc), then click **Parse storyboard & templates**.", icon="📝")
 elif has_story and has_template and not st.session_state.pages:
     st.warning("Click **Parse storyboard & templates** to begin (no GPT call yet).", icon="👉")
 elif st.session_state.pages and not st.session_state.visualized:
