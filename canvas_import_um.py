@@ -1,61 +1,77 @@
 # canvas_import_um.py
 # -----------------------------------------------------------------------------
-# 📄 DOCX → GPT → Canvas (Multi-Page)
-# - DOCX or Google Doc → parse <canvas_page> blocks
-# - uMich template parsing
-# - Visualize with GPT
-# - Upload Pages/Assignments/Discussions
-# - NEW: New Quizzes with per-question shuffle + feedback (question & answer)
+# 📄 DOCX/Google Doc → GPT (with Knowledge Base) → Canvas (Pages/Assignments/Discussions/New Quizzes)
+#
+# Key upgrades:
+# - Uses OpenAI Vector Stores + File Search so you don't paste full templates into the prompt.
+# - "Template KB" sidebar: create/update a vector store from a .docx or Google Doc URL.
+# - New Quizzes with per-question shuffle + question/answer feedback.
+# - Still supports classic Pages/Assignments/Discussions and classic quizzes.
 # -----------------------------------------------------------------------------
 
 from io import BytesIO
 import uuid
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
+import json
+import re
+import requests
 import streamlit as st
 from docx import Document
 from openai import OpenAI
-import requests
-import re
-import json
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
 
-# ---------------------------- UI & State -------------------------------------
-st.set_page_config(page_title="📄 DOCX → GPT → Canvas (Multi-Page)", layout="wide")
-st.title("📄 Upload DOCX → Convert via GPT → Upload to Canvas")
+# ---------------------------- App Setup --------------------------------------
+st.set_page_config(page_title="📄 DOCX → GPT (KB) → Canvas", layout="wide")
+st.title("📄 Upload DOCX → Convert via GPT (Knowledge Base) → Upload to Canvas")
 
-if "pages" not in st.session_state:
-    st.session_state.pages = []
-if "templates" not in st.session_state:
-    st.session_state.templates = {"page": {}, "component": {}}
-if "gpt_results" not in st.session_state:
-    st.session_state.gpt_results = {}
-if "visualized" not in st.session_state:
-    st.session_state.visualized = False
+# ---------------------------- Session State ----------------------------------
+def _init_state():
+    defaults = {
+        "pages": [],
+        "templates": {"page": {}, "component": {}},  # kept for backwards-compat, not used in KB flow
+        "gpt_results": {},     # key: page_idx -> {"html":..., "quiz_json":...}
+        "visualized": False,
+        "vector_store_id": None,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
-# ------------------------ Inputs / Credentials -------------------------------
+_init_state()
+
+# ------------------------ Sidebar: Credentials & Sources ---------------------
 with st.sidebar:
     st.header("Setup")
 
+    # Storyboard sources
     uploaded_file = st.file_uploader("Storyboard (.docx)", type="docx")
-    st.subheader("Pull Storyboard from Google Docs")
-    gdoc_url = st.text_input("Google Doc URL (share with the Service Account)")
+    st.subheader("Or pull storyboard from Google Docs")
+    gdoc_url = st.text_input("Storyboard Google Doc URL")
     sa_json = st.file_uploader("Service Account JSON (for Drive read)", type=["json"])
 
-    template_file = st.file_uploader("uMich Template Code (.docx)", type="docx")
-    gdoc_url_template = st.text_input("Template Google Doc URL (optional)")
+    # Template KB (Vector Store) management
+    st.subheader("Template Knowledge Base")
+    kb_col1, kb_col2 = st.columns(2)
+    with kb_col1:
+        existing_vs = st.text_input("Vector Store ID (optional)", value=st.session_state.get("vector_store_id") or "")
+    with kb_col2:
+        st.caption("Paste an existing ID to reuse your KB")
+    kb_docx = st.file_uploader("Upload template DOCX (optional)", type=["docx"])
+    kb_gdoc_url = st.text_input("Template Google Doc URL (optional)")
 
+    # Canvas + OpenAI
+    st.subheader("Canvas & OpenAI")
     canvas_domain = st.text_input("Canvas Base URL", placeholder="canvas.instructure.com")
     course_id = st.text_input("Canvas Course ID")
     canvas_token = st.text_input("Canvas API Token", type="password")
     openai_api_key = st.text_input("OpenAI API Key", type="password")
 
     use_new_quizzes = st.checkbox("Use New Quizzes (recommended)", value=True)
-
     dry_run = st.checkbox("🔍 Preview only (Dry Run)", value=False)
     if dry_run:
         st.info("No data will be sent to Canvas. This is a preview only.", icon="ℹ️")
 
-# ------------------------- Google Drive Helpers ------------------------------
+# ------------------------ Google Drive Helpers -------------------------------
 def _gdoc_id_from_url(url: str):
     if not url:
         return None
@@ -78,62 +94,7 @@ def fetch_docx_from_gdoc(file_id: str, sa_json_bytes: bytes) -> BytesIO:
     ).execute()
     return BytesIO(data)
 
-# ------------------------- Helper: Template Parser ---------------------------
-def extract_templates_and_components(template_docx_file):
-    doc = Document(template_docx_file)
-    lines = [p.text for p in doc.paragraphs]
-    text = "\n".join([ln for ln in lines])
-
-    blocks = re.split(r"(?=^#\.\s|\[TEMPLATE\]|\[TEMPLATE ELEMENT\])", text, flags=re.MULTILINE)
-    template_pages, components = {}, {}
-
-    for block in blocks:
-        b = block.strip()
-        if not b:
-            continue
-        header_line = b.splitlines()[0].strip()
-        is_page_template = header_line.startswith("#.")
-        is_component = ("[TEMPLATE ELEMENT]" in header_line) or header_line.startswith("[TEMPLATE]")
-
-        if is_page_template:
-            h2_match = re.search(r"<h2[^>]*>(.*?)</h2>", b, flags=re.IGNORECASE | re.DOTALL)
-            key = re.sub(r"\s+", " ", h2_match.group(1).strip()) if h2_match else re.sub(r"^#\.\s*", "", header_line).strip()
-            template_pages[key] = b
-        elif is_component:
-            key = re.sub(r"^\[TEMPLATE(?:\sELEMENT)?\]\s*", "", header_line).strip()
-            components[key] = b
-        else:
-            if '<div class="canvasPageCon"' in b:
-                h2_match = re.search(r"<h2[^>]*>(.*?)</h2>", b, flags=re.IGNORECASE | re.DOTALL)
-                key = re.sub(r"\s+", " ", h2_match.group(1).strip()) if h2_match else header_line
-                template_pages[key] = b
-            else:
-                components[header_line] = b
-
-    normalized_pages, normalized_components = {}, {}
-    for k, v in template_pages.items():
-        norm = k.lower()
-        normalized_pages[k] = v
-        normalized_pages[norm] = v
-        if "overview" in norm: normalized_pages["module_overview"] = v
-        if "video page" in norm: normalized_pages["video_page"] = v
-        if "two video page" in norm: normalized_pages["two_video_page"] = v
-        if "three video page" in norm: normalized_pages["three_video_page"] = v
-        if "reading page" in norm: normalized_pages["reading_page"] = v
-        if "activity page" in norm: normalized_pages["activity_page"] = v
-        if "assignment instructions" in norm: normalized_pages["assignment_instructions"] = v
-
-    for k, v in components.items():
-        norm = k.lower()
-        normalized_components[k] = v
-        normalized_components[norm] = v
-        if "accordion" in norm: normalized_components["accordion"] = v
-        if "call out" in norm or "callout" in norm: normalized_components["callout"] = v
-        if "table" in norm: normalized_components["table"] = v
-
-    return normalized_pages, normalized_components
-
-# -------------------------- Helper: Storyboard Parser ------------------------
+# ------------------------ DOCX Parsers ---------------------------------------
 def extract_canvas_pages(storyboard_docx_file):
     """Pull out everything between <canvas_page>...</canvas_page>"""
     doc = Document(storyboard_docx_file)
@@ -158,20 +119,18 @@ def extract_tag(tag, block):
     m = re.search(fr"<{tag}>(.*?)</{tag}>", block, flags=re.DOTALL | re.IGNORECASE)
     return m.group(1).strip() if m else ""
 
-# ------------------------------ Canvas API (Classic) -------------------------
+# ------------------------ Canvas API (classic) -------------------------------
 def get_or_create_module(module_name, domain, course_id, token, module_cache):
     if module_name in module_cache:
         return module_cache[module_name]
     url = f"https://{domain}/api/v1/courses/{course_id}/modules"
     headers = {"Authorization": f"Bearer {token}"}
-
     resp = requests.get(url, headers=headers)
     if resp.status_code == 200:
         for m in resp.json():
             if m["name"].strip().lower() == module_name.strip().lower():
                 module_cache[module_name] = m["id"]
                 return m["id"]
-
     resp = requests.post(url, headers=headers, json={"module": {"name": module_name, "published": True}})
     if resp.status_code in (200, 201):
         mid = resp.json().get("id")
@@ -248,11 +207,9 @@ def add_to_module(domain, course_id, module_id, item_type, ref, title, token):
     resp = requests.post(url, headers=headers, json=payload)
     return resp.status_code in (200, 201)
 
-# ------------------------------ Canvas API (New Quizzes) ---------------------
+# ------------------------ Canvas API (New Quizzes) ---------------------------
 def add_new_quiz(domain, course_id, title, description_html, token, points_possible=1):
-    """
-    Create a New Quiz (LTI) and return its assignment_id.
-    """
+    """Create a New Quiz (LTI) and return its assignment_id."""
     url = f"https://{domain}/api/quiz/v1/courses/{course_id}/quizzes"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {"quiz": {"title": title, "points_possible": max(points_possible, 1), "instructions": description_html or ""}}
@@ -265,26 +222,15 @@ def add_new_quiz(domain, course_id, title, description_html, token, points_possi
 
 def add_new_quiz_mcq(domain, course_id, assignment_id, q, token, position=1):
     """
-    Create a Multiple Choice (choice) item in a New Quiz WITH:
+    Create a Multiple Choice item in a New Quiz with:
       - per-question shuffle (q['shuffle'])
       - question-level feedback (q['feedback'] -> correct/incorrect/neutral)
       - per-answer feedback (answers[i]['feedback'])
-    JSON schema expected for each q:
-      {
-        "question_name": "Q1",
-        "question_text": "<p>Stem</p>",
-        "shuffle": true,
-        "feedback": {"correct":"<p>..</p>","incorrect":"<p>..</p>","neutral":"<p>..</p>"},
-        "answers": [
-          {"text":"A","is_correct":false,"feedback":"<p>Why A is wrong...</p>"},
-          {"text":"B","is_correct":true,"feedback":"<p>Why B is right...</p>"}
-        ]
-      }
     """
     url = f"https://{domain}/api/quiz/v1/courses/{course_id}/quizzes/{assignment_id}/items"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-    # Build choices (+ collect per-answer feedback)
+    # Build choices (+ per-answer feedback)
     choices = []
     answer_feedback_map = {}
     correct_choice_id = None
@@ -294,7 +240,6 @@ def add_new_quiz_mcq(domain, course_id, assignment_id, q, token, position=1):
         if ans.get("is_correct"):
             correct_choice_id = cid
         if ans.get("feedback"):
-            # Map the UUID to its rich feedback HTML
             answer_feedback_map[cid] = ans["feedback"]
 
     if not choices:
@@ -304,12 +249,8 @@ def add_new_quiz_mcq(domain, course_id, assignment_id, q, token, position=1):
         correct_choice_id = choices[0]["id"]  # fallback
 
     shuffle = bool(q.get("shuffle", False))
-    properties = {
-        "shuffleRules": {"choices": {"toLock": [], "shuffled": shuffle}},
-        "varyPointsByAnswer": False
-    }
+    properties = {"shuffleRules": {"choices": {"toLock": [], "shuffled": shuffle}}, "varyPointsByAnswer": False}
 
-    # Question-level feedback (all optional)
     fb = q.get("feedback") or {}
     feedback_block = {}
     if fb.get("correct"): feedback_block["correct"] = fb["correct"]
@@ -326,38 +267,89 @@ def add_new_quiz_mcq(domain, course_id, assignment_id, q, token, position=1):
         "scoring_data": {"value": correct_choice_id},
         "scoring_algorithm": "Equivalence"
     }
-
     if feedback_block:
-        entry["feedback"] = feedback_block  # question-level feedback
+        entry["feedback"] = feedback_block
     if answer_feedback_map:
-        entry["answer_feedback"] = answer_feedback_map  # per-answer feedback
+        entry["answer_feedback"] = answer_feedback_map
 
-    item_payload = {
-        "item": {
-            "entry_type": "Item",
-            "points_possible": 1,
-            "position": position,
-            "entry": entry
-        }
-    }
-
+    item_payload = {"item": {"entry_type": "Item", "points_possible": 1, "position": position, "entry": entry}}
     resp = requests.post(url, headers=headers, json=item_payload)
     if resp.status_code not in (200, 201):
         st.warning(f"⚠️ Failed to add item to New Quiz: {resp.status_code} | {resp.text}")
 
-# ------------------------- Extraction / Preparation --------------------------
+# ------------------------ OpenAI KB (Vector Store) ---------------------------
+def ensure_client():
+    if not openai_api_key:
+        st.error("OpenAI API key is required.")
+        st.stop()
+    return OpenAI(api_key=openai_api_key)
+
+def create_vector_store(client: OpenAI, name="umich_canvas_templates"):
+    vs = client.vector_stores.create(name=name)
+    return vs.id
+
+def upload_file_to_vs(client: OpenAI, vector_store_id: str, file_like, filename: str):
+    # Upload a file and attach it to the vector store
+    f = client.files.create(file=(filename, file_like), purpose="assistants")
+    client.vector_stores.files.create(vector_store_id=vector_store_id, file_id=f.id)
+
+def fetch_bytes_for_kb():
+    """
+    Returns (bytes_io, filename) from kb_docx or kb_gdoc_url; None if neither provided.
+    """
+    if kb_docx is not None:
+        return BytesIO(kb_docx.getvalue()), kb_docx.name
+    if kb_gdoc_url and sa_json:
+        fid = _gdoc_id_from_url(kb_gdoc_url)
+        if fid:
+            try:
+                data = fetch_docx_from_gdoc(fid, sa_json.read())
+                return data, "template_from_gdoc.docx"
+            except Exception as e:
+                st.error(f"❌ Could not fetch Template Google Doc: {e}")
+                return None
+    return None
+
+# KB actions
+kb_cols = st.columns([1, 1, 1])
+with kb_cols[0]:
+    if st.button("Create Vector Store", use_container_width=True):
+        client = ensure_client()
+        vs_id = create_vector_store(client)
+        st.session_state.vector_store_id = vs_id
+        st.success(f"✅ Created Vector Store: {vs_id}")
+
+with kb_cols[1]:
+    if st.button("Upload Template to KB", use_container_width=True, disabled=not (st.session_state.get("vector_store_id") or existing_vs)):
+        client = ensure_client()
+        vs_id = (st.session_state.get("vector_store_id") or existing_vs).strip()
+        got = fetch_bytes_for_kb()
+        if not vs_id:
+            st.error("Vector Store ID missing.")
+        elif not got:
+            st.error("Provide a template .docx or Google Doc URL + SA JSON.")
+        else:
+            data, fname = got
+            upload_file_to_vs(client, vs_id, data, fname)
+            st.success("✅ Template uploaded to KB.")
+
+with kb_cols[2]:
+    if st.button("Use Existing VS ID", use_container_width=True):
+        if existing_vs.strip():
+            st.session_state.vector_store_id = existing_vs.strip()
+            st.success(f"✅ Using Vector Store: {st.session_state.vector_store_id}")
+        else:
+            st.error("Paste a Vector Store ID first.")
+
+# ------------------------ Parse Storyboard + Prepare Pages -------------------
 col1, col2 = st.columns([1, 2])
 with col1:
     has_story = bool(uploaded_file or (gdoc_url and sa_json))
-    has_template = bool(template_file or (gdoc_url_template and sa_json))
-
-    if st.button("1️⃣ Parse storyboard & templates", type="primary", use_container_width=True,
-                 disabled=not (has_story and has_template)):
-        st.session_state.pages = []
+    if st.button("1️⃣ Parse storyboard", type="primary", use_container_width=True, disabled=not has_story):
+        st.session_state.pages.clear()
         st.session_state.gpt_results.clear()
         st.session_state.visualized = False
 
-        # Storyboard source
         story_source = uploaded_file
         if not story_source and gdoc_url and sa_json:
             fid = _gdoc_id_from_url(gdoc_url)
@@ -365,30 +357,13 @@ with col1:
                 try:
                     story_source = fetch_docx_from_gdoc(fid, sa_json.read())
                 except Exception as e:
-                    st.error(f"❌ Could not fetch Google Doc (storyboard): {e}")
+                    st.error(f"❌ Could not fetch Storyboard Google Doc: {e}")
 
         if not story_source:
-            st.error("Please upload a storyboard .docx OR provide a Google Doc URL + Service Account JSON.")
+            st.error("Upload a storyboard .docx OR provide a Google Doc URL + SA JSON.")
             st.stop()
 
         raw_pages = extract_canvas_pages(story_source)
-
-        # Template source
-        tmpl_source = template_file
-        if not tmpl_source and gdoc_url_template and sa_json:
-            fid_t = _gdoc_id_from_url(gdoc_url_template)
-            if fid_t:
-                try:
-                    tmpl_source = fetch_docx_from_gdoc(fid_t, sa_json.read())
-                except Exception as e:
-                    st.error(f"❌ Could not fetch Google Doc (template): {e}")
-
-        if not tmpl_source:
-            st.error("Please upload the uMich template .docx OR provide its Google Doc URL.")
-            st.stop()
-
-        template_pages, components = extract_templates_and_components(tmpl_source)
-        st.session_state.templates = {"page": template_pages, "component": components}
 
         last_known_module = None
         for idx, block in enumerate(raw_pages):
@@ -398,26 +373,28 @@ with col1:
 
             if not module_name:
                 h1 = re.search(r"<h1>(.*?)</h1>", block, flags=re.IGNORECASE | re.DOTALL)
-                if h1: module_name = h1.group(1).strip()
+                if h1:
+                    module_name = h1.group(1).strip()
             if not module_name:
                 m = re.search(r"\b(Module\s+[A-Za-z0-9 ]+)", page_title, flags=re.IGNORECASE)
-                if m: module_name = m.group(1).strip()
+                if m:
+                    module_name = m.group(1).strip()
             if not module_name:
                 module_name = last_known_module or "General"
             last_known_module = module_name
 
-            template_type = extract_tag("template_type", block).strip()
+            template_type = extract_tag("template_type", block).strip()  # optional
 
             st.session_state.pages.append({
                 "index": idx,
                 "raw": block,
-                "page_type": page_type,
+                "page_type": page_type,      # "page" | "assignment" | "discussion" | "quiz"
                 "page_title": page_title,
                 "module_name": module_name,
                 "template_type": template_type
             })
 
-        st.success(f"✅ Parsed {len(st.session_state.pages)} page(s) and loaded templates/components.")
+        st.success(f"✅ Parsed {len(st.session_state.pages)} page(s).")
 
 with col2:
     st.write("")
@@ -431,8 +408,7 @@ if st.session_state.pages:
             with c1:
                 new_title = st.text_input("Page Title", value=p["page_title"], key=f"title_{i}")
             with c2:
-                new_type = st.selectbox("Page Type",
-                                        options=["page", "assignment", "discussion", "quiz"],
+                new_type = st.selectbox("Page Type", options=["page", "assignment", "discussion", "quiz"],
                                         index=["page", "assignment", "discussion", "quiz"].index(p["page_type"]),
                                         key=f"type_{i}")
             with c3:
@@ -445,92 +421,74 @@ if st.session_state.pages:
             p["module_name"] = new_module.strip() or p["module_name"]
             p["template_type"] = new_template.strip()
 
-    # --------------------- Visualization Trigger (GPT run) -------------------
     st.divider()
     visualize_clicked = st.button(
-        "🔎 Visualize pages with GPT (no Canvas upload yet)",
-        type="primary", use_container_width=True, disabled=not openai_api_key
+        "🔎 Visualize pages with GPT (via Knowledge Base — no upload yet)",
+        type="primary", use_container_width=True, disabled=not (openai_api_key and st.session_state.get("vector_store_id"))
     )
 
     if visualize_clicked:
         client = OpenAI(api_key=openai_api_key)
         st.session_state.gpt_results.clear()
-        template_pages = st.session_state.templates["page"]
-        components = st.session_state.templates["component"]
 
-        with st.spinner("Generating HTML for all pages via GPT..."):
+        SYSTEM = (
+            "You are an expert Canvas HTML generator.\n"
+            "Use the file_search tool to find the exact uMich template by name or structure.\n"
+            "STRICT TEMPLATE RULES:\n"
+            "- Reproduce template HTML verbatim (do NOT change or remove elements, attributes, classes, data-*).\n"
+            "- Preserve all <img> tags exactly (src, data-api-endpoint/returntype, width/height).\n"
+            "- Only replace inner text/HTML in content areas (headings, paragraphs, lists);\n"
+            "  if a section has no content, leave the template section in place; append extra sections at the end.\n"
+            "- Keep .bluePageHeader, .header, .divisionLineYellow, .landingPageFooter intact.\n\n"
+            "QUIZ RULES (when <page_type> is 'quiz'):\n"
+            "- Questions appear between <quiz_start> and </quiz_end>.\n"
+            "- <multiple_choice> blocks use '*' prefix to mark correct choices.\n"
+            "- If <shuffle> appears inside a question, set \"shuffle\": true; else false.\n"
+            "- Question-level feedback tags (optional):\n"
+            "  <feedback_correct>...</feedback_correct>, <feedback_incorrect>...</feedback_incorrect>, <feedback_neutral>...</feedback_neutral>\n"
+            "- Per-answer feedback (optional): '(feedback: ...)' after a choice line or <feedback>A: ...</feedback>.\n"
+            "RETURN:\n"
+            "1) Canvas-ready HTML (no code fences)\n"
+            "2) If page_type is 'quiz', append a JSON object at the very END (no extra text) with:\n"
+            "{ \"quiz_description\": \"<html>\", \"questions\": [\n"
+            "  {\"question_name\":\"...\",\"question_text\":\"...\",\n"
+            "   \"answers\":[{\"text\":\"A\",\"is_correct\":false,\"feedback\":\"<p>...</p>\"}, {\"text\":\"B\",\"is_correct\":true}],\n"
+            "   \"shuffle\": true,\n"
+            "   \"feedback\": {\"correct\":\"<p>...</p>\",\"incorrect\":\"<p>...</p>\",\"neutral\":\"<p>...</p>\"}\n"
+            "  }\n"
+            "]}\n"
+        )
+
+        with st.spinner("Generating HTML for all pages via GPT + KB..."):
             for p in st.session_state.pages:
                 idx = p["index"]
                 raw_block = p["raw"]
-
-                # --- System prompt with SHUFFLE + FEEDBACK guidance ---
-                system_prompt = f"""
-You are an expert Canvas HTML generator.
-
-Match storyboard tags to uMich Canvas templates/components documents, then use the html from the document to create Canvas-ready HTML while keeping all html styling components in place.
-Keep all image and horizontal line code as is. It should translate to Canvas without changes.
-
-<canvas_page>, </canvas_page>
-<page_type> (page|assignment|discussion|quiz)
-<template_type>
-<page_title>
-
-If the page is a quiz, ALSO output JSON (schema below) for MCQ items.
-
-QUIZ RULES:
-- Questions appear between <quiz_start> and </quiz_end>.
-- <multiple_choice> blocks use '*' prefix to mark correct choices.
-- If <shuffle> appears inside a question block, set "shuffle": true for that question; else false.
-- If feedback tags appear, include them in JSON:
-  <feedback_correct>...</feedback_correct> -> feedback.correct
-  <feedback_incorrect>...</feedback_incorrect> -> feedback.incorrect
-  <feedback_neutral>...</feedback_neutral> -> feedback.neutral
-  For per-answer feedback, allow '(feedback: ...)' after a choice line OR <feedback>A: ...</feedback>.
-  Preserve HTML inside feedback blocks verbatim.
-  Links within the content should be linked out as is. 
-
-RETURN:
-1) HTML (no code fences)
-2) If page_type is "quiz", append JSON like:
-{{
-  "quiz_description": "<html description>",
-  "questions": [
-    {{
-      "question_name": "Q1",
-      "question_text": "Text or HTML",
-      "answers": [{{"text":"A","is_correct":false,"feedback":"<p>...</p>"}},{{"text":"B","is_correct":true}}],
-      "shuffle": true,
-      "feedback": {{"correct":"<p>...</p>","incorrect":"<p>...</p>","neutral":"<p>...</p>"}}
-    }}
-  ]
-}}
-
-TEMPLATE PAGES (keys → html, truncated):
-{json.dumps({k: (template_pages[k][:400] + ' ... [truncated]') for k in list(template_pages.keys())[:30]}, ensure_ascii=False)}
-
-COMPONENTS (keys → html, truncated):
-{json.dumps({k: (components[k][:300] + ' ... [truncated]') for k in list(components.keys())[:30]}, ensure_ascii=False)}
-"""
-
-                user_prompt = f"""
-Use template_type="{p['template_type'] or 'auto'}" if it matches a known template; otherwise choose best fit.
-
-Storyboard page block:
-{raw_block}
-"""
-
-                response = client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[{"role": "system", "content": system_prompt},
-                              {"role": "user", "content": user_prompt}],
-                    temperature=0.2
+                user_prompt = (
+                    f'Use template_type="{p["template_type"] or "auto"}" if it matches a known template; '
+                    "otherwise choose best fit.\n\n"
+                    "Storyboard page block:\n"
+                    f"{raw_block}"
                 )
 
-                raw = response.choices[0].message.content.strip()
-                cleaned = re.sub(r"```(html|json)?", "", raw, flags=re.IGNORECASE).strip()
+                response = client.responses.create(
+                    model="gpt-4o",
+                    input=[
+                        {"role": "system", "content": SYSTEM},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    tools=[{
+                        "type": "file_search",
+                        "vector_store_ids": [st.session_state["vector_store_id"]]
+                    }]
+                )
 
+                raw_out = response.output_text or ""
+                cleaned = re.sub(r"```(html|json)?", "", raw_out, flags=re.IGNORECASE).strip()
+
+                # Pull LAST {...} JSON block (quiz meta) if present
                 json_match = re.search(r"({[\s\S]+})\s*$", cleaned)
-                quiz_json, html_result = None, cleaned
+                quiz_json = None
+                html_result = cleaned
                 if json_match and p["page_type"] == "quiz":
                     try:
                         quiz_json = json.loads(json_match.group(1))
@@ -682,11 +640,12 @@ if st.session_state.pages and st.session_state.visualized:
 
 # ----------------------------- UX Guidance -----------------------------------
 has_story = bool(uploaded_file or (gdoc_url and sa_json))
-has_template = bool(template_file or (gdoc_url_template and sa_json))
-
-if not has_story or not has_template:
-    st.info("Provide a storyboard (.docx or Google Doc) and the template (.docx or Google Doc), then click **Parse storyboard & templates**.", icon="📝")
-elif has_story and has_template and not st.session_state.pages:
-    st.warning("Click **Parse storyboard & templates** to begin (no GPT call yet).", icon="👉")
+if not has_story:
+    st.info("Provide a storyboard (.docx upload or Google Doc URL + SA JSON), then click **Parse storyboard**.", icon="📝")
+elif has_story and not st.session_state.pages:
+    st.warning("Click **Parse storyboard** to begin (no GPT call yet).", icon="👉")
 elif st.session_state.pages and not st.session_state.visualized:
-    st.info("Review & adjust page metadata above, then click **Visualize pages with GPT**.", icon="🔎")
+    if not st.session_state.get("vector_store_id"):
+        st.warning("Set up the Template Knowledge Base first (Create Vector Store, then upload your template), then click **Visualize**.", icon="📚")
+    else:
+        st.info("Review & adjust page metadata above, then click **Visualize pages with GPT**.", icon="🔎")
