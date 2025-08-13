@@ -17,6 +17,9 @@ import requests
 import streamlit as st
 from docx import Document
 from openai import OpenAI
+from docx.table import _Cell, Table
+from docx.text.paragraph import Paragraph
+import html
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
@@ -439,6 +442,7 @@ if st.session_state.pages:
             "- Preserve all <img> tags exactly (src, data-api-endpoint/returntype, width/height).\n"
             "- Only replace inner text/HTML in content areas (headings, paragraphs, lists);\n"
             "  if a section has no content, remove the template section in place; append extra sections at the end.\n"
+            "- if a section does not exist in the template, create it with the same structure.\n"
             "- <element_type> tags are used to mark template code associations found within the file_search.\n"
             "- <accordion_title> are used for the summary tag in html accordions.\n"
             "- <accordion_content> are used for the content inside the accordion.\n"
