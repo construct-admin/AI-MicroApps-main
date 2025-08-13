@@ -563,6 +563,7 @@ if st.session_state.pages:
             "STRICT TEMPLATE RULES:\n"
             "- Reproduce template HTML verbatim (do NOT change or remove elements, attributes, classes, data-*).\n"
             "- Preserve all <img> tags exactly (src, data-api-endpoint/returntype, width/height).\n"
+            "- Preserve all links in the content.\n"
             "- Only replace inner text/HTML in content areas (headings, paragraphs, lists);\n"
             "  if a section has no content, remove the template section in place; append extra sections at the end.\n"
             "- if a section does not exist in the template, create it with the same structure.\n"
