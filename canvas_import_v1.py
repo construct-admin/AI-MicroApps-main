@@ -421,6 +421,104 @@ SYSTEM_PROMPT = (
     "- Never remove <img>, <table>, or explicit HTML already present in the storyboard.\n"
 )
 
+def _html_escape(s: str) -> str:
+    return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+
+def parse_quiz_from_storyboard(block: str) -> dict:
+    """
+    Fallback parser that needs NO GPT.
+    It builds the JSON your New Quiz inserter expects:
+      { "quiz_description": "<html>", "questions":[ ... ] }
+    Rules:
+      - Description = everything outside <quiz_start>...</quiz_end> (preserved as-is)
+      - Questions   = inside <quiz_start>...</quiz_end>
+      - <multiple_choice> blocks with lines; '*' means correct
+      - <shuffle> inside a question enables per-question shuffle
+      - Per-answer feedback: "(feedback: ...)" at end of the choice line
+      - Question feedback blocks (optional): <feedback_correct>, <feedback_incorrect>, <feedback_neutral>
+    """
+    desc_html = block
+    m = re.search(r"<quiz_start>(.*?)</quiz_end>", block, flags=re.I|re.S)
+    qchunk = ""
+    if m:
+        qchunk = m.group(1).strip()
+        # description = block with the quiz section removed
+        desc_html = (block[:m.start()] + block[m.end():]).strip()
+
+    # Keep any explicit HTML in the storyboard as-is
+    # but ensure it’s wrapped (Canvas instructions accept HTML)
+    if not re.search(r"</?(div|p|ul|ol|table|h\d)\b", desc_html, flags=re.I):
+        # simple paragraph wrapper if it’s plain text
+        desc_html = "<p>" + _html_escape(desc_html).replace("\n\n","</p><p>").replace("\n","<br/>") + "</p>"
+
+    questions = []
+    # Split into questions by <question> ... </question>
+    for qblk in re.split(r"(?i)</?question>", qchunk):
+        qb = qblk.strip()
+        if not qb: 
+            continue
+
+        # per-question shuffle?
+        shuffle = bool(re.search(r"(?i)<\s*shuffle\s*/?\s*>", qb))
+
+        # feedback (question level)
+        fb_correct  = extract_tag("feedback_correct", qb)
+        fb_incorrect= extract_tag("feedback_incorrect", qb)
+        fb_neutral  = extract_tag("feedback_neutral", qb)
+        qfb = {}
+        if fb_correct:   qfb["correct"]   = fb_correct
+        if fb_incorrect: qfb["incorrect"] = fb_incorrect
+        if fb_neutral:   qfb["neutral"]   = fb_neutral
+
+        # multiple_choice block
+        mc = re.search(r"(?is)<\s*multiple_choice\s*>(.*?)</\s*multiple_choice\s*>", qb)
+        if not mc:
+            # If no MC block, treat whole thing as a stem with one dummy answer to avoid API reject
+            questions.append({
+                "question_name": "Question",
+                "question_text": qb,
+                "answers": [{"text": "OK", "is_correct": True}],
+                "shuffle": shuffle,
+                "feedback": qfb or {}
+            })
+            continue
+
+        lines = [ln.strip() for ln in mc.group(1).strip().splitlines() if ln.strip()]
+        answers = []
+        saw_correct = False
+        for ln in lines:
+            # Per-answer feedback e.g. "Choice A (feedback: why)"
+            fb_match = re.search(r"\(feedback\s*:\s*(.*?)\)\s*$", ln, flags=re.I)
+            a_fb = fb_match.group(1).strip() if fb_match else None
+            text = re.sub(r"\(feedback\s*:\s*.*?\)\s*$", "", ln, flags=re.I).strip()
+
+            is_correct = text.startswith("*")
+            if is_correct:
+                text = text[1:].strip()
+                saw_correct = True
+            answers.append({"text": text, "is_correct": is_correct, **({"feedback": a_fb} if a_fb else {})})
+
+        if not answers:
+            continue
+        if not saw_correct:
+            # Canvas requires a correct answer; mark first as correct if none flagged
+            answers[0]["is_correct"] = True
+
+        # stem = everything outside <multiple_choice> (first paragraph-ish)
+        stem = re.sub(r"(?is)<\s*multiple_choice\s*>.*?</\s*multiple_choice\s*>", "", qb).strip()
+        if not stem:
+            stem = "Choose the best answer."
+
+        questions.append({
+            "question_name": "Question",
+            "question_text": stem,
+            "answers": answers,
+            "shuffle": shuffle,
+            "feedback": qfb or {}
+        })
+
+    return {"quiz_description": desc_html, "questions": questions}
+
 # ================================ Tabs ========================================
 
 tab_pages, tab_quizzes, tab_discussions = st.tabs(["Pages", "New Quizzes", "Discussions"])
@@ -581,8 +679,19 @@ with tab_quizzes:
             for p in quiz_pages:
                 if p["index"] not in sel: continue
                 bundle = st.session_state.gpt_results.get(p["index"], {})
-                html_desc = (bundle.get("quiz_json", {}) or {}).get("quiz_description") or bundle.get("html", "") or ""
-                quiz_json = bundle.get("quiz_json") or {}
+                bundle = st.session_state.gpt_results.get(p["index"], {}) or {}
+                html_desc = (bundle.get("quiz_json") or {}).get("quiz_description") or bundle.get("html") or ""
+                quiz_json = bundle.get("quiz_json") if isinstance(bundle.get("quiz_json"), dict) else {}
+
+                # 🔁 Fallback if either description or questions are missing
+                if not html_desc or not (quiz_json.get("questions") if isinstance(quiz_json, dict) else []):
+                    parsed = parse_quiz_from_storyboard(p["raw"])
+                    # Fill whichever parts were missing
+                    if not html_desc:
+                        html_desc = parsed.get("quiz_description") or ""
+                    if not (quiz_json.get("questions") if isinstance(quiz_json, dict) else []):
+                        quiz_json = parsed
+
 
                 # 1) Try true clone
                 new_qid = clone_new_quiz_if_supported(canvas_domain, course_id, str(template_choice["id"]), canvas_token) if template_choice else None
