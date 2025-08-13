@@ -166,28 +166,92 @@ def poll_progress_until_done(domain, progress_id, token, timeout_s=180, interval
         time.sleep(interval_s)
 
 def copy_assignment(domain, course_id, template_assignment_id, new_name, token):
-    """Duplicate ANY assignment (works for New Quizzes LTI). Return new assignment_id."""
-    url = f"https://{domain}/api/v1/courses/{course_id}/assignments/{template_assignment_id}/copy"
-    resp = requests.post(url, headers=_auth_headers(token), json={"name": new_name})
-    if resp.status_code not in (200, 201):
-        st.error(f"❌ Assignment copy failed: {resp.status_code} | {resp.text}")
-        return None
-    p = resp.json()
-    pid = p.get("id") or p.get("progress", {}).get("id")
-    if not pid:
-        # Some instances return created object directly
+    """
+    Try native duplication (keeps *everything*), else fallback to New-Quizzes-aware clone
+    that replicates settings through the LTI API and returns a new assignment_id.
+    """
+    headers = _auth_headers(token)
+
+    # ---- Attempt 1: native copy endpoint (best, if enabled) ----
+    url_copy = f"https://{domain}/api/v1/courses/{course_id}/assignments/{template_assignment_id}/copy"
+    try:
+        resp = requests.post(url_copy, headers=headers, json={"name": new_name})
+    except Exception as e:
+        st.error(f"❌ Copy request failed to reach Canvas: {e}")
+        resp = None
+
+    if resp is not None and resp.status_code in (200, 201):
+        p = resp.json()
+        progress_id = p.get("id") or p.get("progress", {}).get("id")
+        if progress_id:
+            done = poll_progress_until_done(domain, progress_id, token)
+            if done and done.get("workflow_state") == "completed":
+                completion = done.get("completion") or done.get("results") or {}
+                if isinstance(completion, dict):
+                    return completion.get("assignment_id") or completion.get("id")
+        # Some shards return the object directly:
         return p.get("assignment_id") or p.get("id")
-    done = poll_progress_until_done(domain, pid, token)
-    if not done or done.get("workflow_state") != "completed":
-        st.warning("⚠️ Copy job didn't report 'completed' in time; trying fallback by name.")
+
+    # If we got a hard error (common: 404/403), show a short diagnostic
+    code = resp.status_code if resp is not None else "N/A"
+    text_preview = (resp.text[:500] if (resp is not None and resp.text) else "").strip()
+    st.warning(f"⚠️ Assignment copy not available (status {code}). Falling back to New Quiz clone.\nURL tried: {url_copy}\n{(text_preview or '')}")
+
+    # ---- Attempt 2: Fallback clone for New Quizzes (LTI) ----
+    # 2a) Read the template quiz settings
+    url_get = f"https://{domain}/api/quiz/v1/courses/{course_id}/quizzes/{template_assignment_id}"
+    getq = requests.get(url_get, headers=headers)
+    if getq.status_code != 200:
+        st.error(f"❌ Couldn’t read New Quiz settings for template {template_assignment_id}: {getq.status_code} | {getq.text[:300]}")
+        return None
+    
+    tmpl_id = str(p.get("template_assignment_id") or "").strip()
+    if not tmpl_id.isdigit():
+        st.error(f"Please choose a valid template assignment from the dropdown for '{p['page_title']}' (need a numeric ID, got: {tmpl_id or 'none'}).")
+    else:
+        new_asg_id = copy_assignment(canvas_domain, course_id, tmpl_id, p["page_title"], canvas_token)
+    
+
+    q = getq.json().get("quiz", getq.json())  # some shards wrap under "quiz"
+    # Extract commonly-used settings; add more as your tenant supports them
+    settings = {
+        "title": new_name,
+        "instructions": q.get("instructions") or q.get("description") or "",
+        "points_possible": max(1, int(q.get("points_possible") or 1)),
+    }
+    # Optional settings (only set if present to avoid 400s on locked tenants)
+    opt_map = {
+        "time_limit": "time_limit",
+        "allowed_attempts": "allowed_attempts",
+        "one_question_at_a_time": "one_question_at_a_time",
+        "show_correct_answers": "show_correct_answers",
+        "shuffle_answers": "shuffle_answers",
+        "scoring_policy": "scoring_policy",
+        "access_code": "access_code",
+        "ip_filter": "ip_filter",
+        "due_at": "due_at",
+        "lock_at": "lock_at",
+        "unlock_at": "unlock_at",
+    }
+    for src, dest in opt_map.items():
+        if q.get(src) is not None:
+            settings[dest] = q[src]
+
+    # 2b) Create a new New Quiz with those settings
+    url_create = f"https://{domain}/api/quiz/v1/courses/{course_id}/quizzes"
+    payload = {"quiz": settings}
+    create = requests.post(url_create, headers=headers, json=payload)
+    if create.status_code not in (200, 201):
+        st.error(f"❌ Fallback New Quiz creation failed: {create.status_code} | {create.text[:300]}")
+        return None
+
+    created = create.json()
+    new_assignment_id = created.get("assignment_id") or created.get("id")
+    if not new_assignment_id:
+        # last-ditch—lookup by name
         return find_assignment_id_by_name(domain, course_id, new_name, token)
-    completion = done.get("completion") or done.get("results") or {}
-    if isinstance(completion, dict):
-        if "assignment_id" in completion:
-            return completion["assignment_id"]
-        if "id" in completion:
-            return completion["id"]
-    return find_assignment_id_by_name(domain, course_id, new_name, token)
+    return new_assignment_id
+
 
 # ------------------------ Canvas Classic (Pages/Assign/Disc/Classic Quiz) ----
 def get_or_create_module(module_name, domain, course_id, token, module_cache):
