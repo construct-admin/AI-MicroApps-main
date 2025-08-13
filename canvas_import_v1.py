@@ -1,19 +1,24 @@
-# canvas_import_v1.py
+# canvas_import_um.py
 # -----------------------------------------------------------------------------
-# 📄 DOCX/Google Doc → GPT (with Knowledge Base) → Canvas
-# - Vector Store + file_search to avoid huge prompts
-# - Preserves links/images/tables and ALL storyboard content (no-drop rules)
-# - New Quizzes: per-question shuffle + feedback; uses a course template quiz
-#   named: "[TEMPLATE] Knowledge Check/Quiz: TITLE"
-# - If template quiz is found, a new New Quiz is created with page_title
-#   and your generated questions are inserted.
-# - Also supports Pages / Assignments / Discussions / Classic Quizzes fallback
+# 📄 DOCX/Google Doc → GPT (with Knowledge Base) → Canvas (Pages/Assignments/
+#     Discussions/New Quizzes — with template duplication)
+#
+# What's in here:
+# - File Search / Vector Store for template code (so prompts stay small)
+# - DOCX + Google Doc storyboard parsing
+# - Table-preserving rules and NO-DROP coverage rules
+# - New Quizzes:
+#     • Choose a template assignment (New Quiz) in the sidebar
+#     • Duplicate it (keeps ALL settings), rename, update instructions
+#     • Insert MCQ items with per-question shuffle + feedback + per-answer feedback
+# - Classic Pages / Assignments / Discussions remain supported
 # -----------------------------------------------------------------------------
 
 from io import BytesIO
 import uuid
 import json
 import re
+import time
 import requests
 import streamlit as st
 from docx import Document
@@ -29,27 +34,27 @@ st.title("📄 Upload DOCX → Convert via GPT (Knowledge Base) → Upload to Ca
 def _init_state():
     defaults = {
         "pages": [],
-        "gpt_results": {},     # key: page_idx -> {"html":..., "quiz_json":...}
+        "gpt_results": {},        # idx -> {"html":..., "quiz_json":...}
         "visualized": False,
         "vector_store_id": None,
+        "assignments_cache": [],  # list of course assignments (for template pick)
+        "selected_template_assignment_id": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
-
 _init_state()
 
 # ------------------------ Sidebar: Credentials & Sources ---------------------
 with st.sidebar:
     st.header("Setup")
-
     # Storyboard sources
     uploaded_file = st.file_uploader("Storyboard (.docx)", type="docx")
     st.subheader("Or pull storyboard from Google Docs")
     gdoc_url = st.text_input("Storyboard Google Doc URL")
     sa_json = st.file_uploader("Service Account JSON (for Drive read)", type=["json"])
 
-    # Template KB (Vector Store) management
+    # Template KB (Vector Store)
     st.subheader("Template Knowledge Base")
     kb_col1, kb_col2 = st.columns(2)
     with kb_col1:
@@ -61,7 +66,7 @@ with st.sidebar:
 
     # Canvas + OpenAI
     st.subheader("Canvas & OpenAI")
-    canvas_domain = st.text_input("Canvas Base URL", placeholder="yourinstitution.instructure.com")
+    canvas_domain = st.text_input("Canvas Base URL", placeholder="canvas.instructure.com")
     course_id = st.text_input("Canvas Course ID")
     canvas_token = st.text_input("Canvas API Token", type="password")
     openai_api_key = st.text_input("OpenAI API Key", type="password")
@@ -119,56 +124,97 @@ def extract_tag(tag, block):
     m = re.search(fr"<{tag}>(.*?)</{tag}>", block, flags=re.DOTALL | re.IGNORECASE)
     return m.group(1).strip() if m else ""
 
-# ------------------------ Canvas API: common helpers -------------------------
+# ------------------------ Canvas helpers -------------------------------------
 def _auth_headers(token):
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-def _get_paginated(domain, path, token, per_page=100):
-    url = f"https://{domain}{path}"
-    headers = _auth_headers(token)
+def list_course_assignments(domain, course_id, token, search_term=None, per_page=100):
+    """Fetch up to 'per_page' assignments (simple one-page fetch)."""
+    url = f"https://{domain}/api/v1/courses/{course_id}/assignments"
     params = {"per_page": per_page}
-    out = []
-    while True:
-        resp = requests.get(url, headers=headers, params=params)
-        if resp.status_code != 200:
-            return out
-        out.extend(resp.json())
-        # simple link header next detection
-        link = resp.headers.get("Link", "")
-        m = re.search(r'<([^>]+)>;\s*rel="next"', link)
-        if not m:
-            break
-        url = m.group(1)
-        params = None
-    return out
+    if search_term:
+        params["search_term"] = search_term
+    resp = requests.get(url, headers=_auth_headers(token), params=params)
+    if resp.status_code != 200:
+        st.warning(f"Could not list assignments: {resp.status_code}")
+        return []
+    return resp.json() or []
 
-# ------------------------ Canvas API (classic) -------------------------------
+def find_assignment_id_by_name(domain, course_id, name, token):
+    """Fallback: find newest exact name match."""
+    assignments = list_course_assignments(domain, course_id, token, search_term=name, per_page=100)
+    matches = [a for a in assignments if a.get("name", "").strip() == name.strip()]
+    if not matches:
+        return None
+    def _key(a): return a.get("updated_at") or a.get("created_at") or ""
+    return sorted(matches, key=_key, reverse=True)[0].get("id")
+
+def poll_progress_until_done(domain, progress_id, token, timeout_s=120, interval_s=2):
+    """Poll /progress for long jobs like assignment copy."""
+    url = f"https://{domain}/api/v1/progress/{progress_id}"
+    start = time.time()
+    while True:
+        r = requests.get(url, headers=_auth_headers(token))
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if data.get("workflow_state") in ("completed", "failed"):
+            return data
+        if time.time() - start > timeout_s:
+            return data
+        time.sleep(interval_s)
+
+def copy_assignment(domain, course_id, template_assignment_id, new_name, token):
+    """Duplicate ANY assignment (works for New Quizzes LTI). Return new assignment_id."""
+    url = f"https://{domain}/api/v1/courses/{course_id}/assignments/{template_assignment_id}/copy"
+    resp = requests.post(url, headers=_auth_headers(token), json={"name": new_name})
+    if resp.status_code not in (200, 201):
+        st.error(f"❌ Assignment copy failed: {resp.status_code} | {resp.text}")
+        return None
+    p = resp.json()
+    pid = p.get("id") or p.get("progress", {}).get("id")
+    if not pid:
+        # Rare installs may return created object directly
+        return p.get("assignment_id") or p.get("id")
+
+    done = poll_progress_until_done(domain, pid, token)
+    if not done or done.get("workflow_state") != "completed":
+        st.warning("⚠️ Copy job didn't report 'completed' in time; trying fallback by name.")
+        return find_assignment_id_by_name(domain, course_id, new_name, token)
+
+    completion = done.get("completion") or done.get("results") or {}
+    if isinstance(completion, dict):
+        if "assignment_id" in completion:
+            return completion["assignment_id"]
+        if "id" in completion:
+            return completion["id"]
+    # Fallback by name
+    return find_assignment_id_by_name(domain, course_id, new_name, token)
+
+# ------------------------ Canvas Classic (Pages/Assign/Disc/Classic Quiz) ----
 def get_or_create_module(module_name, domain, course_id, token, module_cache):
     if module_name in module_cache:
         return module_cache[module_name]
     url = f"https://{domain}/api/v1/courses/{course_id}/modules"
-    headers = _auth_headers(token)
-    # find existing
-    for m in _get_paginated(domain, f"/api/v1/courses/{course_id}/modules", token):
-        if m["name"].strip().lower() == module_name.strip().lower():
-            module_cache[module_name] = m["id"]
-            return m["id"]
-    # create
-    resp = requests.post(url, headers=headers, json={"module": {"name": module_name, "published": True}})
+    resp = requests.get(url, headers=_auth_headers(token))
+    if resp.status_code == 200:
+        for m in resp.json():
+            if m["name"].strip().lower() == module_name.strip().lower():
+                module_cache[module_name] = m["id"]
+                return m["id"]
+    resp = requests.post(url, headers=_auth_headers(token), json={"module": {"name": module_name, "published": True}})
     if resp.status_code in (200, 201):
         mid = resp.json().get("id")
         module_cache[module_name] = mid
         return mid
-    else:
-        st.error(f"❌ Failed to create/find module: {module_name}")
-        st.error(f"📬 Response: {resp.status_code} | {resp.text}")
-        return None
+    st.error(f"❌ Failed to create/find module: {module_name}")
+    st.error(f"📬 Response: {resp.status_code} | {resp.text}")
+    return None
 
 def add_page(domain, course_id, title, html_body, token):
     url = f"https://{domain}/api/v1/courses/{course_id}/pages"
-    headers = _auth_headers(token)
     payload = {"wiki_page": {"title": title, "body": html_body, "published": True}}
-    resp = requests.post(url, headers=headers, json=payload)
+    resp = requests.post(url, headers=_auth_headers(token), json=payload)
     if resp.status_code in (200, 201):
         return resp.json().get("url")
     st.error(f"❌ Page create failed: {resp.text}")
@@ -176,9 +222,9 @@ def add_page(domain, course_id, title, html_body, token):
 
 def add_assignment(domain, course_id, title, html_body, token):
     url = f"https://{domain}/api/v1/courses/{course_id}/assignments"
-    headers = _auth_headers(token)
-    payload = {"assignment": {"name": title, "description": html_body, "published": True, "submission_types": ["online_text_entry"], "points_possible": 10}}
-    resp = requests.post(url, headers=headers, json=payload)
+    payload = {"assignment": {"name": title, "description": html_body, "published": True,
+                              "submission_types": ["online_text_entry"], "points_possible": 10}}
+    resp = requests.post(url, headers=_auth_headers(token), json=payload)
     if resp.status_code in (200, 201):
         return resp.json().get("id")
     st.error(f"❌ Assignment create failed: {resp.text}")
@@ -186,28 +232,25 @@ def add_assignment(domain, course_id, title, html_body, token):
 
 def add_discussion(domain, course_id, title, html_body, token):
     url = f"https://{domain}/api/v1/courses/{course_id}/discussion_topics"
-    headers = _auth_headers(token)
     payload = {"title": title, "message": html_body, "published": True}
-    resp = requests.post(url, headers=headers, json=payload)
+    resp = requests.post(url, headers=_auth_headers(token), json=payload)
     if resp.status_code in (200, 201):
         return resp.json().get("id")
     st.error(f"❌ Discussion create failed: {resp.text}")
     return None
 
-# Classic quiz fallback
 def add_quiz(domain, course_id, title, description_html, token):
     url = f"https://{domain}/api/v1/courses/{course_id}/quizzes"
-    headers = _auth_headers(token)
-    payload = {"quiz": {"title": title, "description": description_html or "", "published": True, "quiz_type": "assignment", "scoring_policy": "keep_highest"}}
-    resp = requests.post(url, headers=headers, json=payload)
+    payload = {"quiz": {"title": title, "description": description_html or "", "published": True,
+                        "quiz_type": "assignment", "scoring_policy": "keep_highest"}}
+    resp = requests.post(url, headers=_auth_headers(token), json=payload)
     if resp.status_code in (200, 201):
         return resp.json().get("id")
-    st.error(f"❌ Classic Quiz create failed: {resp.text}")
+    st.error(f"❌ Quiz create failed: {resp.text}")
     return None
 
 def add_quiz_question(domain, course_id, quiz_id, q):
     url = f"https://{domain}/api/v1/courses/{course_id}/quizzes/{quiz_id}/questions"
-    headers = _auth_headers(canvas_token)
     question_payload = {
         "question": {
             "question_name": q.get("question_name") or "Question",
@@ -217,45 +260,47 @@ def add_quiz_question(domain, course_id, quiz_id, q):
             "answers": [{"text": a["text"], "weight": 100 if a.get("is_correct") else 0} for a in q.get("answers", [])]
         }
     }
-    requests.post(url, headers=headers, json=question_payload)
+    requests.post(url, headers=_auth_headers(canvas_token), json=question_payload)
 
 def add_to_module(domain, course_id, module_id, item_type, ref, title, token):
+    """item_type: Page | Quiz | Assignment | Discussion"""
     url = f"https://{domain}/api/v1/courses/{course_id}/modules/{module_id}/items"
-    headers = _auth_headers(token)
     payload = {"module_item": {"title": title, "type": item_type, "published": True}}
     if item_type == "Page":
         payload["module_item"]["page_url"] = ref
     else:
         payload["module_item"]["content_id"] = ref
-    resp = requests.post(url, headers=headers, json=payload)
+    resp = requests.post(url, headers=_auth_headers(token), json=payload)
     return resp.status_code in (200, 201)
 
-# ------------------------ Canvas API (New Quizzes) ---------------------------
-def add_new_quiz(domain, course_id, title, description_html, token, points_possible=1):
-    """Create a New Quiz (LTI) and return its assignment_id."""
-    url = f"https://{domain}/api/quiz/v1/courses/{course_id}/quizzes"
-    headers = _auth_headers(token)
-    payload = {"quiz": {"title": title, "points_possible": max(points_possible, 1), "instructions": description_html or ""}}
-    resp = requests.post(url, headers=headers, json=payload)
-    if resp.status_code in (200, 201):
-        data = resp.json()
-        # New Quizzes returns both a quiz id and an assignment_id; we use assignment_id to add items
-        return data.get("assignment_id") or data.get("id")
-    st.error(f"❌ New Quiz create failed: {resp.status_code} | {resp.text}")
-    return None
+# ------------------------ New Quizzes (LTI) APIs -----------------------------
+def patch_new_quiz(domain, course_id, assignment_id, token, *, title=None, instructions_html=None, points_possible=None):
+    """Update duplicated New Quiz metadata (only sends provided keys)."""
+    url = f"https://{domain}/api/quiz/v1/courses/{course_id}/quizzes/{assignment_id}"
+    body = {"quiz": {}}
+    if title is not None:
+        body["quiz"]["title"] = title
+    if instructions_html is not None:
+        body["quiz"]["instructions"] = instructions_html
+    if points_possible is not None:
+        body["quiz"]["points_possible"] = max(1, int(points_possible))
+    if not body["quiz"]:
+        return True
+    resp = requests.patch(url, headers=_auth_headers(token), json=body)
+    return resp.status_code in (200, 201)
 
 def add_new_quiz_mcq(domain, course_id, assignment_id, q, token, position=1):
-    """Create a Multiple Choice item in a New Quiz with shuffle + feedback."""
+    """Insert a Choice item with shuffle + question/answer feedback."""
     url = f"https://{domain}/api/quiz/v1/courses/{course_id}/quizzes/{assignment_id}/items"
     headers = _auth_headers(token)
 
-    # Build choices (+ per-answer feedback)
     choices = []
     answer_feedback_map = {}
     correct_choice_id = None
     for idx, ans in enumerate(q.get("answers", []), start=1):
         cid = str(uuid.uuid4())
-        choices.append({"id": cid, "position": idx, "itemBody": f"<p>{ans.get('text','')}</p>"})
+        ans_text = ans.get("text", "")
+        choices.append({"id": cid, "position": idx, "itemBody": f"<p>{ans_text}</p>"})
         if ans.get("is_correct"):
             correct_choice_id = cid
         if ans.get("feedback"):
@@ -265,16 +310,16 @@ def add_new_quiz_mcq(domain, course_id, assignment_id, q, token, position=1):
         st.warning("Skipping MCQ with no answers.")
         return
     if not correct_choice_id:
-        correct_choice_id = choices[0]["id"]  # fallback
+        correct_choice_id = choices[0]["id"]
 
     shuffle = bool(q.get("shuffle", False))
     properties = {"shuffleRules": {"choices": {"toLock": [], "shuffled": shuffle}}, "varyPointsByAnswer": False}
 
     fb = q.get("feedback") or {}
     feedback_block = {}
-    if fb.get("correct"):   feedback_block["correct"] = fb["correct"]
+    if fb.get("correct"): feedback_block["correct"] = fb["correct"]
     if fb.get("incorrect"): feedback_block["incorrect"] = fb["incorrect"]
-    if fb.get("neutral"):   feedback_block["neutral"] = fb["neutral"]
+    if fb.get("neutral"): feedback_block["neutral"] = fb["neutral"]
 
     entry = {
         "interaction_type_slug": "choice",
@@ -291,42 +336,10 @@ def add_new_quiz_mcq(domain, course_id, assignment_id, q, token, position=1):
     if answer_feedback_map:
         entry["answer_feedback"] = answer_feedback_map
 
-    item_payload = {"item": {"entry_type": "Item", "points_possible": 1, "position": position, "entry": entry}}
-    resp = requests.post(url, headers=headers, json=item_payload)
+    payload = {"item": {"entry_type": "Item", "points_possible": 1, "position": position, "entry": entry}}
+    resp = requests.post(url, headers=headers, json=payload)
     if resp.status_code not in (200, 201):
         st.warning(f"⚠️ Failed to add item to New Quiz: {resp.status_code} | {resp.text}")
-
-# ------- New Quizzes: find template & “duplicate” (create + apply settings) ---
-TEMPLATE_QUIZ_NAME = "[TEMPLATE] Knowledge Check/Quiz: TITLE"
-
-def find_assignment_by_name(domain, course_id, token, name_exact_or_substring):
-    """Look up an assignment by (substring) name. Returns assignment id or None."""
-    assignments = _get_paginated(domain, f"/api/v1/courses/{course_id}/assignments", token)
-    name_l = name_exact_or_substring.strip().lower()
-    for a in assignments:
-        if name_l in (a.get("name") or "").lower():
-            return a.get("id")
-    return None
-
-def create_new_quiz_from_template(domain, course_id, token, new_title, new_description):
-    """
-    Emulates duplication: we locate the template assignment (New Quiz LTI),
-    then create a new New Quiz (so we control title & content). If template
-    isn't found, we still create a New Quiz.
-    """
-    template_assignment_id = find_assignment_by_name(domain, course_id, token, TEMPLATE_QUIZ_NAME)
-
-    # We could copy some settings from the template later (e.g., points), but
-    # for reliability we at least create a new quiz with our new_title/description.
-    assignment_id = add_new_quiz(domain, course_id, new_title, new_description, token)
-    if not assignment_id:
-        return None
-
-    # (Optional) copy points/settings if you want—requires additional GET on the
-    # New Quizzes API to retrieve settings from template. Many instances restrict
-    # this; so we keep the minimal, safe flow.
-
-    return assignment_id
 
 # ------------------------ OpenAI KB (Vector Store) ---------------------------
 def ensure_client():
@@ -344,7 +357,6 @@ def upload_file_to_vs(client: OpenAI, vector_store_id: str, file_like, filename:
     client.vector_stores.files.create(vector_store_id=vector_store_id, file_id=f.id)
 
 def fetch_bytes_for_kb():
-    """Returns (bytes_io, filename) from kb_docx or kb_gdoc_url; None if neither provided."""
     if kb_docx is not None:
         return BytesIO(kb_docx.getvalue()), kb_docx.name
     if kb_gdoc_url and sa_json:
@@ -389,6 +401,28 @@ with kb_cols[2]:
         else:
             st.error("Paste a Vector Store ID first.")
 
+# ------------------------ Template New Quiz chooser --------------------------
+st.sidebar.subheader("New Quiz Template (to duplicate)")
+tmpl_cols = st.sidebar.columns([1, 1])
+with tmpl_cols[0]:
+    if st.button("Load assignments", use_container_width=True, disabled=not (canvas_domain and course_id and canvas_token)):
+        st.session_state.assignments_cache = list_course_assignments(canvas_domain, course_id, canvas_token, per_page=100)
+        if not st.session_state.assignments_cache:
+            st.warning("No assignments found or insufficient permissions.")
+
+with tmpl_cols[1]:
+    st.caption("Pick the New Quiz template to copy")
+
+if st.session_state.assignments_cache:
+    # Show all assignments; you can filter if you want to show only 'external_tool'
+    options = [f"{a.get('name','(no name)')}  —  ID:{a.get('id')}" for a in st.session_state.assignments_cache]
+    picked = st.selectbox("Template assignment", options, index=0, key="tmpl_pick")
+    if picked:
+        # Extract ID at the end
+        m = re.search(r"ID:(\d+)$", picked)
+        if m:
+            st.session_state.selected_template_assignment_id = m.group(1)
+
 # ------------------------ Parse Storyboard + Prepare Pages -------------------
 col1, col2 = st.columns([1, 2])
 with col1:
@@ -431,7 +465,7 @@ with col1:
                 module_name = last_known_module or "General"
             last_known_module = module_name
 
-            template_type = extract_tag("template_type", block).strip()  # optional
+            template_type = extract_tag("template_type", block).strip()
 
             st.session_state.pages.append({
                 "index": idx,
@@ -472,7 +506,8 @@ if st.session_state.pages:
     st.divider()
     visualize_clicked = st.button(
         "🔎 Visualize pages with GPT (via Knowledge Base — no upload yet)",
-        type="primary", use_container_width=True, disabled=not (openai_api_key and st.session_state.get("vector_store_id"))
+        type="primary", use_container_width=True,
+        disabled=not (openai_api_key and st.session_state.get("vector_store_id"))
     )
 
     if visualize_clicked:
@@ -483,39 +518,35 @@ if st.session_state.pages:
             "You are an expert Canvas HTML generator.\n"
             "Use the file_search tool to find the exact or closest uMich template by name or structure.\n"
             "STRICT TEMPLATE RULES:\n"
-            "- Reproduce template HTML verbatim (do NOT change or remove elements, attributes, classes, data-*).\n"
+            "- Reproduce template HTML verbatim (do NOT change/remove elements, classes, data-* attributes).\n"
             "- Preserve all <img> tags exactly (src, data-api-endpoint/returntype, width/height).\n"
-            "- Only replace inner text/HTML in content areas (headings, paragraphs, lists);\n"
-            "  if a section has no content, remove the template section in place; append extra sections at the end.\n"
-            "- If a section does not exist in the template, create it with the same structure.\n"
-            "- <element_type> tags may appear in the source to mark template associations.\n"
-            "- <accordion_title> is used for the summary tag in accordions; <accordion_content> for the panel.\n"
-            "- Convert any DOCX tables to HTML <table><thead><tbody><tr><th><td> as appropriate.\n"
+            "- Only replace inner text/HTML in content areas; if a section has no content, remove just that section.\n"
+            "- If a section the storyboard needs doesn't exist, create it with the same template structure.\n"
+            "- <element_type> markups indicate template associations; <accordion_title>/<accordion_content> map to details/summary.\n"
+            "- Convert any storyboard tables to real <table><tr><td> HTML; keep any <table> in storyboard verbatim.\n"
             "- Keep .bluePageHeader, .header, .divisionLineYellow, .landingPageFooter intact.\n\n"
             "QUIZ RULES (when <page_type> is 'quiz'):\n"
             "- Questions appear between <quiz_start> and </quiz_end>.\n"
-            "- <multiple_choice> blocks use '*' prefix to mark correct choices.\n"
-            "- If <shuffle> appears inside a question, set \"shuffle\": true; else false.\n"
-            "- Question-level feedback tags (optional):\n"
-            "  <feedback_correct>...</feedback_correct>, <feedback_incorrect>...</feedback_incorrect>, <feedback_neutral>...</feedback_neutral>\n"
+            "- <multiple_choice> uses '*' prefix to mark correct choices.\n"
+            "- <shuffle> inside a question → set \"shuffle\": true.\n"
+            "- Question feedback tags (optional): <feedback_correct>, <feedback_incorrect>, <feedback_neutral>.\n"
             "- Per-answer feedback (optional): '(feedback: ...)' after a choice line or <feedback>A: ...</feedback>.\n"
             "RETURN:\n"
-            "1) Canvas-ready HTML (no code fences) and no other comments.\n"
-            "2) If page_type is 'quiz', append a JSON object at the very END (no extra text) with:\n"
+            "1) Canvas-ready HTML (no code fences)\n"
+            "2) If page_type is 'quiz', append a JSON object at the very END ONLY with:\n"
             "{ \"quiz_description\": \"<html>\", \"questions\": [\n"
             "  {\"question_name\":\"...\",\"question_text\":\"...\",\n"
-            "   \"answers\":[{\"text\":\"A\",\"is_correct\":false,\"feedback\":\"<p>...</p>\"}, {\"text\":\"B\",\"is_correct\":true}],\n"
+            "   \"answers\":[{\"text\":\"A\",\"is_correct\":false,\"feedback\":\"<p>...</p>\"},{\"text\":\"B\",\"is_correct\":true}],\n"
             "   \"shuffle\": true,\n"
             "   \"feedback\": {\"correct\":\"<p>...</p>\",\"incorrect\":\"<p>...</p>\",\"neutral\":\"<p>...</p>\"}\n"
             "  }\n"
             "]}\n"
             "COVERAGE (NO-DROP) RULES\n"
-            "- Do not omit or summarize any substantive content from the storyboard block.\n"
-            "- Every sentence/line from the storyboard (between <canvas_page>…</canvas_page>) MUST appear in the output HTML.\n"
-            "- If some content doesn’t map to a template section, append it at the end under:\n"
-            "  <div class=\"divisionLineYellow\"><h2>Additional Content</h2><div>…unplaced items…</div></div>\n"
-            "- Preserve the original order of content as much as possible.\n"
-            "- Never remove <a>, <img>, <table>, or any explicit HTML already present in the storyboard; include them verbatim.\n"
+            "- Do not omit or summarize substantive content from the storyboard block.\n"
+            "- Every sentence/line between <canvas_page>…</canvas_page> must appear in the output HTML.\n"
+            "- If something doesn’t clearly map, append it at the end under:\n"
+            "  <div class=\"divisionLineYellow\"><h2>Additional Content</h2><div>…unplaced items in order…</div></div>\n"
+            "- Preserve content order. Never remove explicit <img>, <table>, or HTML already present in the storyboard.\n"
         )
 
         with st.spinner("Generating HTML for all pages via GPT + KB..."):
@@ -544,7 +575,7 @@ if st.session_state.pages:
                 raw_out = response.output_text or ""
                 cleaned = re.sub(r"```(html|json)?", "", raw_out, flags=re.IGNORECASE).strip()
 
-                # Pull LAST {...} JSON block (quiz meta) if present
+                # Pull LAST {...} JSON (quiz meta) if present
                 json_match = re.search(r"({[\s\S]+})\s*$", cleaned)
                 quiz_json = None
                 html_result = cleaned
@@ -563,7 +594,6 @@ if st.session_state.pages:
 # ---------------------------- Preview & Upload -------------------------------
 if st.session_state.pages and st.session_state.visualized:
     st.subheader("3️⃣ Previews (post-GPT). Upload to Canvas when ready.")
-
     module_cache = {}
     any_uploaded = False
 
@@ -578,40 +608,6 @@ if st.session_state.pages and st.session_state.visualized:
         if dry_run:
             st.info("Dry run is ON — uploads are disabled.", icon="⏸️")
 
-    def _handle_quiz_upload(p, html_result, quiz_json):
-        """Implements your requested behavior:
-           - Find template '[TEMPLATE] Knowledge Check/Quiz: TITLE'
-           - Create a New Quiz using its presence (emulated duplication)
-           - Title MUST become p['page_title']
-           - Insert adapted questions + feedback/shuffle
-        """
-        description = html_result
-        if quiz_json and isinstance(quiz_json, dict) and "quiz_description" in quiz_json:
-            description = quiz_json.get("quiz_description") or html_result
-
-        # Always create a new New Quiz titled with the Page Title.
-        assignment_id = create_new_quiz_from_template(
-            canvas_domain, course_id, canvas_token,
-            new_title=p["page_title"],
-            new_description=description
-        )
-        if not assignment_id:
-            st.error("❌ New Quiz creation failed.")
-            return False
-
-        # Add our generated items
-        if quiz_json and isinstance(quiz_json, dict):
-            for pos, q in enumerate(quiz_json.get("questions", []), start=1):
-                if q.get("answers"):
-                    add_new_quiz_mcq(canvas_domain, course_id, assignment_id, q, canvas_token, position=pos)
-
-        # Add to module
-        if add_to_module(canvas_domain, course_id, mid, "Assignment", assignment_id, p["page_title"], canvas_token):
-            st.success("✅ New Quiz created from template & added to module.")
-            return True
-        return False
-
-    # Per-page upload UI
     for p in st.session_state.pages:
         idx = p["index"]
         meta = f"{p['page_title']} ({p['page_type']}) | Module: {p['module_name']}"
@@ -646,14 +642,45 @@ if st.session_state.pages and st.session_state.visualized:
                         st.success("✅ Discussion created & added to module.")
 
                 elif p["page_type"] == "quiz":
+                    # Build instructions
+                    description = html_result
+                    if quiz_json and isinstance(quiz_json, dict) and "quiz_description" in quiz_json:
+                        description = quiz_json.get("quiz_description") or html_result
+
                     if use_new_quizzes:
-                        if _handle_quiz_upload(p, html_result, quiz_json):
-                            any_uploaded = True
+                        template_asg_id = st.session_state.get("selected_template_assignment_id")
+                        new_assignment_id = None
+                        if template_asg_id:
+                            # 1) Duplicate template (keeps all settings)
+                            new_assignment_id = copy_assignment(canvas_domain, course_id, template_asg_id, p["page_title"], canvas_token)
+                        else:
+                            st.warning("No template assignment selected; creating a fresh New Quiz.")
+                            # Minimal fresh create (no settings from template)
+                            create_url = f"https://{canvas_domain}/api/quiz/v1/courses/{course_id}/quizzes"
+                            create_payload = {"quiz": {"title": p["page_title"], "instructions": description, "points_possible": 1}}
+                            cr = requests.post(create_url, headers=_auth_headers(canvas_token), json=create_payload)
+                            if cr.status_code in (200, 201):
+                                new_assignment_id = cr.json().get("assignment_id") or cr.json().get("id")
+
+                        if not new_assignment_id:
+                            st.error("❌ Could not create/duplicate New Quiz.")
+                        else:
+                            # 2) Update title/instructions on the duplicate
+                            patch_new_quiz(canvas_domain, course_id, new_assignment_id, canvas_token,
+                                           title=p["page_title"], instructions_html=description)
+
+                            # 3) Add items
+                            if quiz_json and isinstance(quiz_json, dict):
+                                for pos, q in enumerate(quiz_json.get("questions", []), start=1):
+                                    if q.get("answers"):
+                                        add_new_quiz_mcq(canvas_domain, course_id, new_assignment_id, q, canvas_token, position=pos)
+
+                            # 4) Add to module
+                            if add_to_module(canvas_domain, course_id, mid, "Assignment", new_assignment_id, p["page_title"], canvas_token):
+                                any_uploaded = True
+                                st.success("✅ New Quiz duplicated/updated & added to module.")
                     else:
-                        # Classic fallback
-                        description = html_result
-                        if quiz_json and isinstance(quiz_json, dict) and "quiz_description" in quiz_json:
-                            description = quiz_json.get("quiz_description") or html_result
+                        # Classic quiz fallback
                         qid = add_quiz(canvas_domain, course_id, p["page_title"], description, canvas_token)
                         if qid:
                             if quiz_json and isinstance(quiz_json, dict):
@@ -667,7 +694,6 @@ if st.session_state.pages and st.session_state.visualized:
                 else:
                     st.warning(f"Unsupported page_type: {p['page_type']}")
 
-    # Upload ALL
     if upload_all_clicked and (not dry_run):
         for p in st.session_state.pages:
             idx = p["index"]
@@ -696,15 +722,33 @@ if st.session_state.pages and st.session_state.visualized:
                     st.toast(f"Uploaded discussion: {p['page_title']}", icon="✅")
 
             elif p["page_type"] == "quiz":
+                description = html_result
+                if quiz_json and isinstance(quiz_json, dict) and "quiz_description" in quiz_json:
+                    description = quiz_json.get("quiz_description") or html_result
+
                 if use_new_quizzes:
-                    if _handle_quiz_upload(p, html_result, quiz_json):
+                    template_asg_id = st.session_state.get("selected_template_assignment_id")
+                    new_assignment_id = None
+                    if template_asg_id:
+                        new_assignment_id = copy_assignment(canvas_domain, course_id, template_asg_id, p["page_title"], canvas_token)
+                    else:
+                        create_url = f"https://{canvas_domain}/api/quiz/v1/courses/{course_id}/quizzes"
+                        create_payload = {"quiz": {"title": p["page_title"], "instructions": description, "points_possible": 1}}
+                        cr = requests.post(create_url, headers=_auth_headers(canvas_token), json=create_payload)
+                        if cr.status_code in (200, 201):
+                            new_assignment_id = cr.json().get("assignment_id") or cr.json().get("id")
+
+                    if new_assignment_id:
+                        patch_new_quiz(canvas_domain, course_id, new_assignment_id, canvas_token,
+                                       title=p["page_title"], instructions_html=description)
+                        if quiz_json and isinstance(quiz_json, dict):
+                            for pos, q in enumerate(quiz_json.get("questions", []), start=1):
+                                if q.get("answers"):
+                                    add_new_quiz_mcq(canvas_domain, course_id, new_assignment_id, q, canvas_token, position=pos)
+                        add_to_module(canvas_domain, course_id, mid, "Assignment", new_assignment_id, p["page_title"], canvas_token)
                         any_uploaded = True
                         st.toast(f"Uploaded New Quiz: {p['page_title']}", icon="✅")
                 else:
-                    # Classic fallback
-                    description = html_result
-                    if quiz_json and isinstance(quiz_json, dict) and "quiz_description" in quiz_json:
-                        description = quiz_json.get("quiz_description") or html_result
                     qid = add_quiz(canvas_domain, course_id, p["page_title"], description, canvas_token)
                     if qid:
                         if quiz_json and isinstance(quiz_json, dict):
