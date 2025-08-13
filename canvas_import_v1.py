@@ -1,13 +1,13 @@
 # canvas_import_um.py
 # -----------------------------------------------------------------------------
-# 📄 DOCX/Google Doc → GPT (with Knowledge Base) → Canvas (Pages/Assignments/Discussions/New Quizzes)
+# 📄 DOCX/Google Doc → GPT (with Knowledge Base) → Canvas (Pages/Assignments/
+# Discussions/New Quizzes)
 #
-# Key upgrades in this build:
-# - Table-aware storyboard parsing for BOTH uploaded .docx and Google Docs (exported as .docx).
-# - Tables are converted to HTML <table><tr><td>…</td></tr></table> and preserved inside <canvas_page> blocks.
-# - Explicit HTML present in the storyboard (e.g., <h1>, <div>, <img>, etc.) is passed through verbatim.
-# - Stricter "NO-DROP" system prompt to force full coverage of storyboard content in the output HTML.
-# - Vector Store (file_search) knowledge base for templates; New Quizzes with shuffle + feedback.
+# This build fixes:
+# - TypeError from isinstance(Document) by normalizing inputs to python-docx.
+# - Tables & paragraphs are read in document order.
+# - Tables are converted to HTML for GPT + Canvas and never dropped.
+# - Works for uploaded .docx and Google Docs (export → .docx).
 # -----------------------------------------------------------------------------
 
 from io import BytesIO
@@ -16,26 +16,31 @@ import json
 import re
 import requests
 import streamlit as st
-from docx import Document
+
 from openai import OpenAI
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
-from docx.table import Table
+
+# --- python-docx imports (block walker) ---
+from docx import Document as DocxDocument
+from docx.document import Document as _DocxDocument
+from docx.table import _Cell, Table
 from docx.text.paragraph import Paragraph
-import html
+from docx.oxml.table import CT_Tbl
+from docx.oxml.text.paragraph import CT_P
+
+# --- Google Drive export ---
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
-# ---------------------------- App Setup --------------------------------------
+# -----------------------------------------------------------------------------
+# Streamlit UI
+# -----------------------------------------------------------------------------
 st.set_page_config(page_title="📄 DOCX → GPT (KB) → Canvas", layout="wide")
 st.title("📄 Upload DOCX → Convert via GPT (Knowledge Base) → Upload to Canvas")
 
-# ---------------------------- Session State ----------------------------------
 def _init_state():
     defaults = {
         "pages": [],
-        "templates": {"page": {}, "component": {}},  # kept for backwards-compat, not used in KB flow
-        "gpt_results": {},     # key: page_idx -> {"html":..., "quiz_json":...}
+        "gpt_results": {},      # key: page_idx -> {"html":..., "quiz_json":...}
         "visualized": False,
         "vector_store_id": None,
     }
@@ -45,23 +50,26 @@ def _init_state():
 
 _init_state()
 
-# ------------------------ Sidebar: Credentials & Sources ---------------------
+# -----------------------------------------------------------------------------
+# Sidebar
+# -----------------------------------------------------------------------------
 with st.sidebar:
     st.header("Setup")
 
     # Storyboard sources
     uploaded_file = st.file_uploader("Storyboard (.docx)", type="docx")
     st.subheader("Or pull storyboard from Google Docs")
-    gdoc_url = st.text_input("Storyboard Google Doc URL")
+    gdoc_url = st.text_input("Storyboard Google Doc URL (shareable to your SA)")
     sa_json = st.file_uploader("Service Account JSON (for Drive read)", type=["json"])
 
     # Template KB (Vector Store) management
     st.subheader("Template Knowledge Base")
-    kb_col1, kb_col2 = st.columns(2)
-    with kb_col1:
+    vs_cols = st.columns(2)
+    with vs_cols[0]:
         existing_vs = st.text_input("Vector Store ID (optional)", value=st.session_state.get("vector_store_id") or "")
-    with kb_col2:
+    with vs_cols[1]:
         st.caption("Paste an existing ID to reuse your KB")
+
     kb_docx = st.file_uploader("Upload template DOCX (optional)", type=["docx"])
     kb_gdoc_url = st.text_input("Template Google Doc URL (optional)")
 
@@ -77,7 +85,9 @@ with st.sidebar:
     if dry_run:
         st.info("No data will be sent to Canvas. This is a preview only.", icon="ℹ️")
 
-# ------------------------ Google Drive Helpers -------------------------------
+# -----------------------------------------------------------------------------
+# Google Drive helpers
+# -----------------------------------------------------------------------------
 def _gdoc_id_from_url(url: str):
     if not url:
         return None
@@ -88,7 +98,6 @@ def _gdoc_id_from_url(url: str):
     return m.group(1) if m else None
 
 def fetch_docx_from_gdoc(file_id: str, sa_json_bytes: bytes) -> BytesIO:
-    """Export a Google Doc to DOCX and return as BytesIO."""
     creds = Credentials.from_service_account_info(
         json.loads(sa_json_bytes.decode("utf-8")),
         scopes=["https://www.googleapis.com/auth/drive.readonly"],
@@ -100,115 +109,138 @@ def fetch_docx_from_gdoc(file_id: str, sa_json_bytes: bytes) -> BytesIO:
     ).execute()
     return BytesIO(data)
 
-# ------------------------ DOCX Utilities (Paragraphs + Tables → HTML) --------
+# -----------------------------------------------------------------------------
+# python-docx block walker + HTML helpers
+# -----------------------------------------------------------------------------
+def _safe_open_docx(doc_source) -> _DocxDocument:
+    """
+    Accepts Streamlit UploadedFile, BytesIO, bytes, file path, or already-open
+    python-docx Document. Returns a python-docx Document.
+    """
+    if isinstance(doc_source, _DocxDocument):
+        return doc_source
+    if hasattr(doc_source, "read"):  # Streamlit UploadedFile or file-like
+        # Streamlit UploadedFile may be a SpooledTemporaryFile — rebuffer to BytesIO
+        data = doc_source.read()
+        return DocxDocument(BytesIO(data))
+    if isinstance(doc_source, (bytes, bytearray)):
+        return DocxDocument(BytesIO(doc_source))
+    if isinstance(doc_source, BytesIO):
+        return DocxDocument(doc_source)
+    # assume path-like
+    return DocxDocument(doc_source)
+
 def _iter_block_items(parent):
     """
-    Yield paragraphs and tables in document order.
-    Works for Document and _Cell (table cell) objects.
+    Yield paragraphs and tables in document order. Works for Document or _Cell.
     """
-    if isinstance(parent, Document):
-        parent_elm = parent._element.body
-    else:
+    if isinstance(parent, _DocxDocument):
+        parent_elm = parent.element.body
+    elif isinstance(parent, _Cell):
         parent_elm = parent._tc
+    else:
+        raise ValueError("Unsupported container for block iteration")
 
     for child in parent_elm.iterchildren():
-        if child.tag == qn("w:p"):
-            yield Paragraph(child, parent)  # type: ignore
-        elif child.tag == qn("w:tbl"):
-            yield Table(child, parent)  # type: ignore
+        if isinstance(child, CT_P):
+            yield Paragraph(child, parent)
+        elif isinstance(child, CT_Tbl):
+            yield Table(child, parent)
+
+def _escape_html(text: str) -> str:
+    # If the storyboard paragraph already contains angle brackets, assume it's
+    # intentional HTML and pass through; otherwise escape minimal.
+    if "<" in text and ">" in text:
+        return text
+    return (
+        text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+    )
 
 def _paragraph_to_html(p: Paragraph) -> str:
-    """
-    Convert a python-docx Paragraph to HTML.
-    If it looks like explicit HTML (starts with '<' and contains '>'), pass it through verbatim.
-    Else wrap the plain text in <p>…</p>.
-    """
+    # Join runs to preserve inline italics/bold is complex; here we use plain text
+    # and preserve any explicit HTML the author included.
     txt = p.text or ""
-    s = txt.strip()
-    # Pass through raw HTML so storyboard can contain actual tags to keep
-    if s.startswith("<") and ">" in s:
-        return s
-    # Otherwise, keep simple <p>; we could expand to handle bold/italic runs if needed.
-    return f"<p>{html.escape(txt)}</p>" if txt else ""
-
-def _cell_to_html(cell) -> str:
-    parts = []
-    for item in _iter_block_items(cell):
-        if isinstance(item, Paragraph):
-            parts.append(_paragraph_to_html(item))
-        elif isinstance(item, Table):
-            parts.append(_table_to_html(item))
-    return "".join(parts)
+    txt = _escape_html(txt)
+    if not txt.strip():
+        return ""
+    # If user typed a raw tag like <h2>...</h2> keep it; otherwise wrap <p>
+    if re.search(r"</?\w+[^>]*>", txt):
+        return txt
+    return f"<p>{txt}</p>"
 
 def _table_to_html(tbl: Table) -> str:
-    """
-    Convert a python-docx Table to HTML. Handles basic rows/cells.
-    (Merged cells/rowspan/colspan are not explicitly computed here, but content is preserved.)
-    """
     rows_html = []
-    for row in tbl.rows:
+    for r in tbl.rows:
         cells_html = []
-        for c in row.cells:
-            cells_html.append(f"<td>{_cell_to_html(c)}</td>")
+        for c in r.cells:
+            # Flatten cell content: paragraphs + nested tables (rare)
+            parts = []
+            for item in _iter_block_items(c):
+                if isinstance(item, Paragraph):
+                    h = _paragraph_to_html(item)
+                    if h:
+                        parts.append(h)
+                elif isinstance(item, Table):
+                    parts.append(_table_to_html(item))
+            cells_html.append(f"<td>{''.join(parts) or '&nbsp;'}</td>")
         rows_html.append(f"<tr>{''.join(cells_html)}</tr>")
     return f"<table>{''.join(rows_html)}</table>"
 
-# ------------------------ Storyboard Parser (now table-aware) ----------------
-def extract_canvas_pages(storyboard_docx_file):
+# -----------------------------------------------------------------------------
+# Extract storyboard pages (keeps tables!)
+# -----------------------------------------------------------------------------
+def extract_canvas_pages(storyboard_docx_source):
     """
-    Build page blocks from <canvas_page>…</canvas_page> sections.
-    - Walks the DOCX in document order (paragraphs + tables).
-    - Preserves explicit HTML verbatim.
-    - Converts DOCX tables to HTML.
+    Pull out raw text/HTML between <canvas_page> ... </canvas_page>.
+    Preserves tables (converted to <table> HTML) and paragraphs in order.
     """
-    doc = Document(storyboard_docx_file)
+    doc = _safe_open_docx(storyboard_docx_source)
+
     pages = []
     buf = []
     inside = False
 
+    def _flush():
+        nonlocal buf
+        if buf:
+            pages.append("\n".join(buf))
+            buf = []
+
     for block in _iter_block_items(doc):
         if isinstance(block, Paragraph):
-            raw = (block.text or "").strip()
-            low = raw.lower()
-
-            if "<canvas_page>" in low:
-                # Start section; keep the tag line exactly as typed
+            txt = (block.text or "").strip()
+            lo = txt.lower()
+            if "<canvas_page>" in lo:
                 inside = True
-                buf = [raw] if raw else ["<canvas_page>"]
+                buf.append(txt)  # keep the open tag line
                 continue
-
-            if "</canvas_page>" in low:
-                # End section; keep the tag line exactly as typed
-                if raw:
-                    buf.append(raw)
-                else:
-                    buf.append("</canvas_page>")
-                pages.append("\n".join(buf))
-                buf = []
+            if "</canvas_page>" in lo:
+                buf.append(txt)
+                _flush()
                 inside = False
                 continue
-
             if inside:
-                # Append rendered paragraph HTML or raw HTML
-                rendered = _paragraph_to_html(block)
-                if rendered:
-                    buf.append(rendered)
+                h = _paragraph_to_html(block)
+                if h:
+                    buf.append(h)
 
         elif isinstance(block, Table):
             if inside:
                 buf.append(_table_to_html(block))
 
-    # Safety: if file ended while still inside a page, flush what we have
-    if inside and buf:
-        pages.append("\n".join(buf))
-
+    # In case a page was never properly closed but we reached EOF
+    _flush()
     return pages
 
 def extract_tag(tag, block):
     m = re.search(fr"<{tag}>(.*?)</{tag}>", block, flags=re.DOTALL | re.IGNORECASE)
     return m.group(1).strip() if m else ""
 
-# ------------------------ Canvas API (classic) -------------------------------
+# -----------------------------------------------------------------------------
+# Canvas (classic + new quizzes) — unchanged core behavior
+# -----------------------------------------------------------------------------
 def get_or_create_module(module_name, domain, course_id, token, module_cache):
     if module_name in module_cache:
         return module_cache[module_name]
@@ -243,7 +275,8 @@ def add_page(domain, course_id, title, html_body, token):
 def add_assignment(domain, course_id, title, html_body, token):
     url = f"https://{domain}/api/v1/courses/{course_id}/assignments"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {"assignment": {"name": title, "description": html_body, "published": True, "submission_types": ["online_text_entry"], "points_possible": 10}}
+    payload = {"assignment": {"name": title, "description": html_body, "published": True,
+                              "submission_types": ["online_text_entry"], "points_possible": 10}}
     resp = requests.post(url, headers=headers, json=payload)
     if resp.status_code in (200, 201):
         return resp.json().get("id")
@@ -260,11 +293,11 @@ def add_discussion(domain, course_id, title, html_body, token):
     st.error(f"❌ Discussion create failed: {resp.text}")
     return None
 
-# Classic quiz fallback
 def add_quiz(domain, course_id, title, description_html, token):
     url = f"https://{domain}/api/v1/courses/{course_id}/quizzes"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {"quiz": {"title": title, "description": description_html or "", "published": True, "quiz_type": "assignment", "scoring_policy": "keep_highest"}}
+    payload = {"quiz": {"title": title, "description": description_html or "", "published": True,
+                        "quiz_type": "assignment", "scoring_policy": "keep_highest"}}
     resp = requests.post(url, headers=headers, json=payload)
     if resp.status_code in (200, 201):
         return resp.json().get("id")
@@ -280,7 +313,8 @@ def add_quiz_question(domain, course_id, quiz_id, q):
             "question_text": q.get("question_text") or "",
             "question_type": "multiple_choice_question",
             "points_possible": 1,
-            "answers": [{"text": a["text"], "weight": 100 if a.get("is_correct") else 0} for a in q.get("answers", [])]
+            "answers": [{"text": a["text"], "weight": 100 if a.get("is_correct") else 0}
+                        for a in q.get("answers", [])]
         }
     }
     requests.post(url, headers=headers, json=question_payload)
@@ -296,12 +330,12 @@ def add_to_module(domain, course_id, module_id, item_type, ref, title, token):
     resp = requests.post(url, headers=headers, json=payload)
     return resp.status_code in (200, 201)
 
-# ------------------------ Canvas API (New Quizzes) ---------------------------
+# ------------------------ New Quizzes (LTI) ----------------------------------
 def add_new_quiz(domain, course_id, title, description_html, token, points_possible=1):
-    """Create a New Quiz (LTI) and return its assignment_id."""
     url = f"https://{domain}/api/quiz/v1/courses/{course_id}/quizzes"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {"quiz": {"title": title, "points_possible": max(points_possible, 1), "instructions": description_html or ""}}
+    payload = {"quiz": {"title": title, "points_possible": max(points_possible, 1),
+                        "instructions": description_html or ""}}
     resp = requests.post(url, headers=headers, json=payload)
     if resp.status_code in (200, 201):
         data = resp.json()
@@ -310,36 +344,27 @@ def add_new_quiz(domain, course_id, title, description_html, token, points_possi
     return None
 
 def add_new_quiz_mcq(domain, course_id, assignment_id, q, token, position=1):
-    """
-    Create a Multiple Choice item in a New Quiz with:
-      - per-question shuffle (q['shuffle'])
-      - question-level feedback (q['feedback'] -> correct/incorrect/neutral)
-      - per-answer feedback (answers[i]['feedback'])
-    """
     url = f"https://{domain}/api/quiz/v1/courses/{course_id}/quizzes/{assignment_id}/items"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-    # Build choices (+ per-answer feedback)
-    choices = []
-    answer_feedback_map = {}
-    correct_choice_id = None
+    # Choices with optional per-answer feedback
+    choices, answer_feedback_map, correct_choice_id = [], {}, None
     for idx, ans in enumerate(q.get("answers", []), start=1):
         cid = str(uuid.uuid4())
-        # NOTE: New Quizzes expects HTML in itemBody; keep plain HTML <p> wrapper.
         choices.append({"id": cid, "position": idx, "itemBody": f"<p>{ans.get('text','')}</p>"})
         if ans.get("is_correct"):
             correct_choice_id = cid
         if ans.get("feedback"):
             answer_feedback_map[cid] = ans["feedback"]
-
     if not choices:
         st.warning("Skipping MCQ with no answers.")
         return
     if not correct_choice_id:
-        correct_choice_id = choices[0]["id"]  # fallback
+        correct_choice_id = choices[0]["id"]
 
     shuffle = bool(q.get("shuffle", False))
-    properties = {"shuffleRules": {"choices": {"toLock": [], "shuffled": shuffle}}, "varyPointsByAnswer": False}
+    properties = {"shuffleRules": {"choices": {"toLock": [], "shuffled": shuffle}},
+                  "varyPointsByAnswer": False}
 
     fb = q.get("feedback") or {}
     feedback_block = {}
@@ -362,12 +387,15 @@ def add_new_quiz_mcq(domain, course_id, assignment_id, q, token, position=1):
     if answer_feedback_map:
         entry["answer_feedback"] = answer_feedback_map
 
-    item_payload = {"item": {"entry_type": "Item", "points_possible": 1, "position": position, "entry": entry}}
+    item_payload = {"item": {"entry_type": "Item", "points_possible": 1,
+                             "position": position, "entry": entry}}
     resp = requests.post(url, headers=headers, json=item_payload)
     if resp.status_code not in (200, 201):
         st.warning(f"⚠️ Failed to add item to New Quiz: {resp.status_code} | {resp.text}")
 
-# ------------------------ OpenAI KB (Vector Store) ---------------------------
+# -----------------------------------------------------------------------------
+# OpenAI Vector Store (KB)
+# -----------------------------------------------------------------------------
 def ensure_client():
     if not openai_api_key:
         st.error("OpenAI API key is required.")
@@ -379,14 +407,10 @@ def create_vector_store(client: OpenAI, name="umich_canvas_templates"):
     return vs.id
 
 def upload_file_to_vs(client: OpenAI, vector_store_id: str, file_like, filename: str):
-    # Upload a file and attach it to the vector store
     f = client.files.create(file=(filename, file_like), purpose="assistants")
     client.vector_stores.files.create(vector_store_id=vector_store_id, file_id=f.id)
 
-def fetch_bytes_for_kb():
-    """
-    Returns (bytes_io, filename) from kb_docx or kb_gdoc_url; None if neither provided.
-    """
+def _kb_fetch_bytes():
     if kb_docx is not None:
         return BytesIO(kb_docx.getvalue()), kb_docx.name
     if kb_gdoc_url and sa_json:
@@ -400,20 +424,20 @@ def fetch_bytes_for_kb():
                 return None
     return None
 
-# KB actions
-kb_cols = st.columns([1, 1, 1])
-with kb_cols[0]:
+kb_ctrls = st.columns([1, 1, 1])
+with kb_ctrls[0]:
     if st.button("Create Vector Store", use_container_width=True):
         client = ensure_client()
         vs_id = create_vector_store(client)
         st.session_state.vector_store_id = vs_id
         st.success(f"✅ Created Vector Store: {vs_id}")
 
-with kb_cols[1]:
-    if st.button("Upload Template to KB", use_container_width=True, disabled=not (st.session_state.get("vector_store_id") or existing_vs)):
+with kb_ctrls[1]:
+    if st.button("Upload Template to KB", use_container_width=True,
+                 disabled=not (st.session_state.get("vector_store_id") or existing_vs)):
         client = ensure_client()
         vs_id = (st.session_state.get("vector_store_id") or existing_vs).strip()
-        got = fetch_bytes_for_kb()
+        got = _kb_fetch_bytes()
         if not vs_id:
             st.error("Vector Store ID missing.")
         elif not got:
@@ -423,7 +447,7 @@ with kb_cols[1]:
             upload_file_to_vs(client, vs_id, data, fname)
             st.success("✅ Template uploaded to KB.")
 
-with kb_cols[2]:
+with kb_ctrls[2]:
     if st.button("Use Existing VS ID", use_container_width=True):
         if existing_vs.strip():
             st.session_state.vector_store_id = existing_vs.strip()
@@ -431,7 +455,9 @@ with kb_cols[2]:
         else:
             st.error("Paste a Vector Store ID first.")
 
-# ------------------------ Parse Storyboard + Prepare Pages -------------------
+# -----------------------------------------------------------------------------
+# Parse storyboard → pages
+# -----------------------------------------------------------------------------
 col1, col2 = st.columns([1, 2])
 with col1:
     has_story = bool(uploaded_file or (gdoc_url and sa_json))
@@ -473,7 +499,7 @@ with col1:
                 module_name = last_known_module or "General"
             last_known_module = module_name
 
-            template_type = extract_tag("template_type", block).strip()  # optional
+            template_type = extract_tag("template_type", block).strip()
 
             st.session_state.pages.append({
                 "index": idx,
@@ -489,7 +515,9 @@ with col1:
 with col2:
     st.write("")
 
-# ------------------------- Editable Page Table (Pre-GPT) ---------------------
+# -----------------------------------------------------------------------------
+# Pre-GPT metadata edit
+# -----------------------------------------------------------------------------
 if st.session_state.pages:
     st.subheader("2️⃣ Review & adjust page metadata (no GPT yet)")
     for i, p in enumerate(st.session_state.pages):
@@ -498,7 +526,8 @@ if st.session_state.pages:
             with c1:
                 new_title = st.text_input("Page Title", value=p["page_title"], key=f"title_{i}")
             with c2:
-                new_type = st.selectbox("Page Type", options=["page", "assignment", "discussion", "quiz"],
+                new_type = st.selectbox("Page Type",
+                                        options=["page", "assignment", "discussion", "quiz"],
                                         index=["page", "assignment", "discussion", "quiz"].index(p["page_type"]),
                                         key=f"type_{i}")
             with c3:
@@ -514,7 +543,8 @@ if st.session_state.pages:
     st.divider()
     visualize_clicked = st.button(
         "🔎 Visualize pages with GPT (via Knowledge Base — no upload yet)",
-        type="primary", use_container_width=True, disabled=not (openai_api_key and st.session_state.get("vector_store_id"))
+        type="primary", use_container_width=True,
+        disabled=not (openai_api_key and st.session_state.get("vector_store_id"))
     )
 
     if visualize_clicked:
@@ -603,21 +633,23 @@ if st.session_state.pages:
         st.session_state.visualized = True
         st.success("✅ Visualization complete. Preview below and upload when ready.")
 
-# ---------------------------- Preview & Upload -------------------------------
+# -----------------------------------------------------------------------------
+# Preview & Upload
+# -----------------------------------------------------------------------------
 if st.session_state.pages and st.session_state.visualized:
     st.subheader("3️⃣ Previews (post-GPT). Upload to Canvas when ready.")
 
     module_cache = {}
     any_uploaded = False
 
-    colA, colB = st.columns([1, 2])
-    with colA:
+    top_cols = st.columns([1, 2])
+    with top_cols[0]:
         upload_all_clicked = st.button(
             "🚀 Upload ALL to Canvas",
             type="secondary",
             disabled=dry_run or not (canvas_domain and course_id and canvas_token)
         )
-    with colB:
+    with top_cols[1]:
         if dry_run:
             st.info("Dry run is ON — uploads are disabled.", icon="⏸️")
 
@@ -740,7 +772,9 @@ if st.session_state.pages and st.session_state.visualized:
         if not any_uploaded:
             st.warning("No items uploaded. Check your tokens/IDs and try again.")
 
-# ----------------------------- UX Guidance -----------------------------------
+# -----------------------------------------------------------------------------
+# UX Guidance
+# -----------------------------------------------------------------------------
 has_story = bool(uploaded_file or (gdoc_url and sa_json))
 if not has_story:
     st.info("Provide a storyboard (.docx upload or Google Doc URL + SA JSON), then click **Parse storyboard**.", icon="📝")
