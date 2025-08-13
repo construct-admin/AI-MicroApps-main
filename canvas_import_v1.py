@@ -554,6 +554,13 @@ if st.session_state.pages:
         SYSTEM = (
             "You are an expert Canvas HTML generator.\n"
             "Use the file_search tool to find the exact or closest uMich template by name or structure.\n"
+            "COVERAGE (NO-DROP) RULES\n"
+            "- Do not omit or summarize any substantive content from the storyboard block.\n"
+            "- Every sentence/line from the storyboard (between <canvas_page>…</canvas_page>) MUST appear in the output HTML.\n"
+            "- If a piece of storyboard content doesn’t clearly map to a template section, append it under a new section at the end:\n"
+            "  <div class=\"divisionLineYellow\"><h2>Additional Content</h2><div>…unplaced items in original order…</div></div>\n"
+            "- Preserve the original order of content as much as possible.\n"
+            "- Never remove <img>, <table>, or any explicit HTML already present in the storyboard; include them verbatim.\n"
             "STRICT TEMPLATE RULES:\n"
             "- Reproduce template HTML verbatim (do NOT change or remove elements, attributes, classes, data-*).\n"
             "- Preserve all <img> tags exactly (src, data-api-endpoint/returntype, width/height).\n"
@@ -582,13 +589,7 @@ if st.session_state.pages:
             "   \"feedback\": {\"correct\":\"<p>...</p>\",\"incorrect\":\"<p>...</p>\",\"neutral\":\"<p>...</p>\"}\n"
             "  }\n"
             "]}\n"
-            "COVERAGE (NO-DROP) RULES\n"
-            "- Do not omit or summarize any substantive content from the storyboard block.\n"
-            "- Every sentence/line from the storyboard (between <canvas_page>…</canvas_page>) MUST appear in the output HTML.\n"
-            "- If a piece of storyboard content doesn’t clearly map to a template section, append it under a new section at the end:\n"
-            "  <div class=\"divisionLineYellow\"><h2>Additional Content</h2><div>…unplaced items in original order…</div></div>\n"
-            "- Preserve the original order of content as much as possible.\n"
-            "- Never remove <img>, <table>, or any explicit HTML already present in the storyboard; include them verbatim.\n"
+            
         )
 
         with st.spinner("Generating HTML for all pages via GPT + KB..."):
@@ -785,3 +786,4 @@ elif st.session_state.pages and not st.session_state.visualized:
         st.warning("Set up the Template Knowledge Base first (Create Vector Store, then upload your template), then click **Visualize**.", icon="📚")
     else:
         st.info("Review & adjust page metadata above, then click **Visualize pages with GPT**.", icon="🔎")
+ 
