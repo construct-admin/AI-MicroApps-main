@@ -465,6 +465,14 @@ if st.session_state.pages:
             "   \"feedback\": {\"correct\":\"<p>...</p>\",\"incorrect\":\"<p>...</p>\",\"neutral\":\"<p>...</p>\"}\n"
             "  }\n"
             "]}\n"
+            "COVERAGE (NO-DROP) RULES\n"
+            " - Do not omit or summarize any substantive content from the storyboard block.\n"
+            " - Every sentence/line from the storyboard (between <canvas_page>…</canvas_page>) MUST appear in the output HTML.\n"
+            " - If a piece of storyboard content doesn’t clearly map to a template section, append it under a new section at the end:\n"
+            " <div class="divisionLineYellow"><h2>Additional Content</h2><div>…unplaced items in original order…</div></div>\n"
+            " - Preserve the original order of content as much as possible."
+            " - Never remove <img>, <table>, or any explicit HTML already present in the storyboard; include them verbatim.\n"
+            "\n"
         )
 
         with st.spinner("Generating HTML for all pages via GPT + KB..."):
