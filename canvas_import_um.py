@@ -425,14 +425,43 @@ if st.session_state.pages:
             p["template_type"] = new_template.strip()
 
     st.divider()
-    visualize_clicked = st.button(
-        "🔎 Visualize pages with GPT (via Knowledge Base — no upload yet)",
-        type="primary", use_container_width=True, disabled=not (openai_api_key and st.session_state.get("vector_store_id"))
+
+    # --- NEW: choose which pages to visualize ---
+    st.markdown("#### 🔎 Choose pages to visualize (via GPT + Knowledge Base)")
+    sel_cols = st.columns([1, 1])
+    with sel_cols[0]:
+        if st.button("Select all"):
+            for i, _ in enumerate(st.session_state.pages):
+                st.session_state[f"viz_sel_{i}"] = True
+    with sel_cols[1]:
+        if st.button("Select none"):
+            for i, _ in enumerate(st.session_state.pages):
+                st.session_state[f"viz_sel_{i}"] = False
+
+    # Show per-page checkboxes
+    selected_indices = []
+    for i, p in enumerate(st.session_state.pages):
+        default_checked = st.session_state.get(f"viz_sel_{i}", False)
+        checked = st.checkbox(
+            f"Page {i+1}: {p['page_title']}  ({p['page_type']}) · Module: {p['module_name']}",
+            value=default_checked,
+            key=f"viz_sel_{i}"
+        )
+        if checked:
+            selected_indices.append(i)
+
+    # Visualize button (only selected)
+    visualize_selected_clicked = st.button(
+        "🔎 Visualize selected pages with GPT (KB — no upload yet)",
+        type="primary",
+        use_container_width=True,
+        disabled=not (openai_api_key and st.session_state.get("vector_store_id") and selected_indices)
     )
 
-    if visualize_clicked:
+    if visualize_selected_clicked:
         client = OpenAI(api_key=openai_api_key)
-        st.session_state.gpt_results.clear()
+        # NOTE: don't wipe all results, only refresh selected indices
+        # st.session_state.gpt_results.clear()   # <- keep previous visualizations for unselected pages
 
         SYSTEM = (
             "You are an expert Canvas HTML generator.\n"
@@ -474,9 +503,9 @@ if st.session_state.pages:
             "- Never remove <img>, <table>, or any explicit HTML already present in the storyboard; include them verbatim.\n"
         )
 
-        with st.spinner("Generating HTML for all pages via GPT + KB..."):
-            for p in st.session_state.pages:
-                idx = p["index"]
+        with st.spinner(f"Generating HTML for {len(selected_indices)} page(s) via GPT + KB..."):
+            for idx in selected_indices:
+                p = st.session_state.pages[idx]
                 raw_block = p["raw"]
                 user_prompt = (
                     f'Use template_type="{p["template_type"] or "auto"}" if it matches a known template; '
@@ -513,8 +542,10 @@ if st.session_state.pages:
 
                 st.session_state.gpt_results[idx] = {"html": html_result, "quiz_json": quiz_json}
 
+        # Mark that at least one visualization has been done so previews show up
         st.session_state.visualized = True
-        st.success("✅ Visualization complete. Preview below and upload when ready.")
+        st.success("✅ Visualization complete for selected page(s). Preview below and upload when ready.")
+
 
 # ---------------------------- Preview & Upload -------------------------------
 if st.session_state.pages and st.session_state.visualized:
