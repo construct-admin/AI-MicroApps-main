@@ -476,6 +476,10 @@ if st.session_state.pages:
             "- <accordion_title> are used for the summary tag in html accordions.\n"
             "- <accordion_content> are used for the content inside the accordion.\n"
             "- table formatting must be converted to HTML tables with <table>, <tr>, <td> tags.\n"
+            "- <Table with Row Striping> is a tag and there is template code for it in the template document.\n"
+            "- <Table with Column Striping> is a tag and there is template code for it in the template document.\n"
+            "- <video> is also a tag with template code in the document. \n" 
+            "- There is a possibility of elements within elements. Please add in the code accordingly. \n" 
             "- Keep .bluePageHeader, .header, .divisionLineYellow, .landingPageFooter intact.\n\n"
             "QUIZ RULES (when <page_type> is 'quiz'):\n"
             "- Questions appear between <quiz_start> and </quiz_end>.\n"
@@ -487,12 +491,45 @@ if st.session_state.pages:
             "RETURN:\n"
             "1) Canvas-ready HTML (no code fences) and no other comments\n"
             "2) If page_type is 'quiz', append a JSON object at the very END (no extra text) with:\n"
-            "{ \"quiz_description\": \"<html>\", \"questions\": [\n"
-            "  {\"question_name\":\"...\",\"question_text\":\"...\",\n"
-            "   \"answers\":[{\"text\":\"A\",\"is_correct\":false,\"feedback\":\"<p>...</p>\"}, {\"text\":\"B\",\"is_correct\":true}],\n"
-            "   \"shuffle\": true,\n"
-            "   \"feedback\": {\"correct\":\"<p>...</p>\",\"incorrect\":\"<p>...</p>\",\"neutral\":\"<p>...</p>\"}\n"
-            "  }\n"
+            "- Support these Canvas-compatible question types:\n"
+            "  multiple_choice_question (single correct), multiple_answers_question (checkboxes), true_false_question, "
+            "  essay_question, short_answer_question (fill-in-one-blank), fill_in_multiple_blanks_question, "
+            "  matching_question, numerical_question.\n"
+            "- Include per-answer feedback when available, and overall feedback via a 'feedback' object "
+            "(keys: 'correct','incorrect','neutral').\n"
+            "JSON SCHEMA EXAMPLES (use only fields relevant to each type; keep it MINIFIED):\n"
+            '{"quiz_description":"<p>Intro...</p>","questions":['
+            # multiple choice
+            '{"question_type":"multiple_choice_question","question_name":"...","question_text":"<p>...</p>",'
+            '"answers":[{"text":"A","is_correct":false,"feedback":"<p>...</p>"},{"text":"B","is_correct":true,"feedback":"<p>...</p>"}],'
+            '"shuffle":true,"feedback":{"correct":"<p>...</p>","incorrect":"<p>...</p>","neutral":"<p>...</p>"}},'
+            # multiple answers (checkboxes)
+            '{"question_type":"multiple_answers_question","question_name":"...","question_text":"<p>...</p>",'
+            '"answers":[{"text":"A","is_correct":true,"feedback":"<p>...</p>"},{"text":"B","is_correct":true,"feedback":"<p>...</p>"},'
+            '{"text":"C","is_correct":false,"feedback":"<p>...</p>"}],'
+            '"feedback":{"correct":"<p>...</p>","incorrect":"<p>...</p>"}},'
+            # true/false
+            '{"question_type":"true_false_question","question_name":"...","question_text":"<p>...</p>",'
+            '"answers":[{"text":"True","is_correct":false,"feedback":"<p>...</p>"},{"text":"False","is_correct":true,"feedback":"<p>...</p>"}],'
+            '"feedback":{"correct":"<p>...</p>","incorrect":"<p>...</p>"}},'
+            # essay
+            '{"question_type":"essay_question","question_name":"...","question_text":"<p>...</p>",'
+            '"feedback":{"neutral":"<p>Instructor graded.</p>"}},'
+            # short answer (single blank; list acceptable strings)
+            '{"question_type":"short_answer_question","question_name":"...","question_text":"<p>...</p>",'
+            '"answers":[{"text":"chlorophyll"},{"text":"chlorophyl"}],'
+            '"feedback":{"correct":"<p>...</p>","incorrect":"<p>...</p>"}},'
+            # fill in multiple blanks (use {{blank_id}} in question_text; map answers by blank_id)
+            '{"question_type":"fill_in_multiple_blanks_question","question_name":"...","question_text":"<p>H{{b1}}O is {{b2}}.</p>",'
+            '"answers":[{"blank_id":"b1","text":"2","feedback":"<p>...</p>"},{"blank_id":"b2","text":"water","feedback":"<p>...</p>"}]},'
+            # matching
+            '{"question_type":"matching_question","question_name":"...","question_text":"<p>Match:</p>",'
+            '"matches":[{"prompt":"H2O","match":"water","feedback":"<p>...</p>"},{"prompt":"NaCl","match":"salt","feedback":"<p>...</p>"}]},'
+            # numerical (exact or exact+tolerance)
+            '{"question_type":"numerical_question","question_name":"...","question_text":"<p>Speed?</p>",'
+            '"numerical_answer":{"exact":12.5,"tolerance":0.5},'
+            '"feedback":{"correct":"<p>...</p>","incorrect":"<p>...</p>"}}'
+            "]}\n"
             "]}\n"
             "COVERAGE (NO-DROP) RULES\n"
             "- Do not omit or summarize any substantive content from the storyboard block.\n"
