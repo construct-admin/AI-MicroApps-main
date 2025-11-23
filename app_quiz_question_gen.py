@@ -1,52 +1,92 @@
-import streamlit as st
+# ------------------------------------------------------------------------------
+# Refactor date: 2025-11-12
+# Refactored by: Imaad Fakier
+# Purpose: Align Quiz Question Generator micro-app with OES GenAI Streamlit standards.
+# ------------------------------------------------------------------------------
+"""
+Quiz Question Generator (Refactored)
+------------------------------------
+Streamlit entrypoint for OES' Quiz Question Generator micro-app.
+
+Highlights in this refactor:
+- Adds `.env` loading via `dotenv` for consistent environment and security handling.
+- Implements unified SHA-256 access-code authentication aligned with other GenAI micro-apps.
+- Improves function-level documentation, formatting, and section headers for clarity.
+- Clarifies dynamic prompt assembly using output format conditions and question-level configuration.
+- Retains the comprehensive `SYSTEM_PROMPT` with formatted example quiz types (Coursera, Open edX, H5P, etc.).
+
+This app dynamically builds quiz questions that align with different platform-specific formatting requirements
+(e.g., Coursera, H5P, OLX) and Bloom's taxonomy alignment, deferring inference to the `core_logic.main` engine.
+"""
+
 import os
 import hashlib
+import streamlit as st
+from dotenv import load_dotenv
 
-# configuration must be at the top.
+# ------------------------------------------------------------------------------
+# Environment setup
+# ------------------------------------------------------------------------------
+load_dotenv()
+
+# ------------------------------------------------------------------------------
+# Streamlit page configuration
+# ------------------------------------------------------------------------------
 st.set_page_config(
     page_title="Quiz Question Generator",
     page_icon="app_images/construct.webp",
     layout="centered",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-### hash code function for the encryption
-def hash_code(input_code):
-    """Hashes the access code using SHA-256."""
-    return hashlib.sha256(input_code.encode()).hexdigest()
 
-### retrieve hash code 
+# ------------------------------------------------------------------------------
+# Authentication utilities
+# ------------------------------------------------------------------------------
+def _hash_code(input_code: str) -> str:
+    """Hash an access code using SHA-256 for secure comparison."""
+    return hashlib.sha256(input_code.encode("utf-8")).hexdigest()
+
+
 ACCESS_CODE_HASH = os.getenv("ACCESS_CODE_HASH")
-
 if not ACCESS_CODE_HASH:
-    st.error("⚠️ Hashed access code not found. Please set ACCESS_CODE_HASH.")
+    st.error(
+        "⚠️ ACCESS_CODE_HASH not found in environment. "
+        "Ask Engineering for the hashed access code and configure it in the deployment environment."
+    )
     st.stop()
 
-### Authentication Logic
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
 if not st.session_state.authenticated:
     st.title("🔒 Access Restricted")
-    access_code_input = st.text_input("Enter Access Code:", type="password")
-
-    if st.button("Submit"):
-        if hash_code(access_code_input) == ACCESS_CODE_HASH:
+    code_input = st.text_input(
+        "Enter Access Code:", type="password", key="access_code_input"
+    )
+    if st.button("Submit", key="submit_access_code"):
+        if _hash_code(code_input) == ACCESS_CODE_HASH:
             st.session_state.authenticated = True
-            st.rerun() 
+            st.rerun()
         else:
             st.error("Incorrect access code. Please try again.")
+    st.stop()
 
-    st.stop()  # Prevent unauthorized access
-
-
+# ------------------------------------------------------------------------------
+# App metadata and configuration
+# ------------------------------------------------------------------------------
 APP_URL = "https://quizquestion-generator.streamlit.app"
 APP_IMAGE = "construct.webp"
 PUBLISHED = True
 
 APP_TITLE = "Quiz Question Generator"
-APP_INTRO = """Use this application to generate quiz questions."""
+APP_INTRO = (
+    "Use this application to generate structured, platform-ready quiz questions."
+)
 
+# ------------------------------------------------------------------------------
+# Core System Prompt
+# ------------------------------------------------------------------------------
 SYSTEM_PROMPT = """System role:
 You are an expert instructional designer who provides support in generating multiple-choice quiz questions. The questions should activate higher-order cognitive skills, and the feedback should support students to gauge their understanding.
 - Each answer option must be on its own line.
@@ -176,39 +216,53 @@ Incorrect: Please review section 2.1: Defining the Segment, and try again.
 End of example for NIC Quiz Feedback
 """
 
-# Helper functions for dynamic conditions
-def get_question_level_conditions():
-    return [
-        {"condition":{},"prompt":"Please align the learning objectives to the following academic stage level: \n Level:"},    
-        {"condition": {"academic_stage_radio": "Lower Primary"}, "prompt": "Lower Primary."},
-        {"condition": {"academic_stage_radio": "Middle Primary"}, "prompt": "Middle Primary."},
-        {"condition": {"academic_stage_radio": "Upper Primary"}, "prompt": "Upper Primary."},
-        {"condition": {"academic_stage_radio": "Lower Secondary"}, "prompt": "Lower Secondary."},
-        {"condition": {"academic_stage_radio": "Upper Secondary"}, "prompt": "Upper Secondary."},
-        {"condition": {"academic_stage_radio": "Undergraduate"}, "prompt": "Undergraduate."},
-        {"condition": {"academic_stage_radio": "Postgraduate"}, "prompt": "Postgraduate."},
-    ]
+# ------------------------------------------------------------------------------
+# Helper Functions
+# ------------------------------------------------------------------------------
+
 
 def get_output_format_conditions():
+    """Return output-format mapping for prompt alignment per LMS platform."""
     return [
-        {"condition": {"output_format": "General Quiz Feedback"}, "prompt": "Please align the output format according to the example provided for the selection General Quiz Feedback."},
-        {"condition": {"output_format": "Answer-Option Level Quiz Feedback"}, "prompt": "Please align the output format according to the example provided for the selection Answer-Option Level Quiz Feedback."},
-        {"condition": {"output_format": "Coursera Ungraded Quiz"}, "prompt": "Please align the output format according to the example provided for the selection Coursera Ungraded Quiz Feedback."},
-        {"condition": {"output_format": "Coursera Graded Quiz"}, "prompt": "Please align the output format according to the example provided for the selection Coursera Graded Quiz."},
-        {"condition": {"output_format": "H5P Textual Upload Feature"}, "prompt": "Please align the output format according to the example provided for the selection H5P Textual Upload Feature."},
-        {"condition": {"output_format": "Open edX OLX Quiz"}, "prompt": "Please align the output format according to the example provided for the selection Open edX OLX Quiz."},
-        {"condition": {"output_format": "NIC Quiz"}, "prompt": "Please align the output format according to the example provided for the selection NIC Quiz."},
+        {
+            "condition": {"output_format": "General Quiz Feedback"},
+            "prompt": "Follow General Quiz Feedback formatting.",
+        },
+        {
+            "condition": {"output_format": "Answer-Option Level Quiz Feedback"},
+            "prompt": "Follow Answer-Option Level Feedback formatting.",
+        },
+        {
+            "condition": {"output_format": "Coursera Ungraded Quiz"},
+            "prompt": "Follow Coursera Ungraded Quiz formatting.",
+        },
+        {
+            "condition": {"output_format": "Coursera Graded Quiz"},
+            "prompt": "Follow Coursera Graded Quiz formatting.",
+        },
+        {
+            "condition": {"output_format": "H5P Textual Upload Feature"},
+            "prompt": "Follow H5P Textual Upload format.",
+        },
+        {
+            "condition": {"output_format": "Open edX OLX Quiz"},
+            "prompt": "Follow Open edX OLX format.",
+        },
+        {
+            "condition": {"output_format": "NIC Quiz"},
+            "prompt": "Follow NIC Quiz structure.",
+        },
     ]
 
-# Define phases and fields
+
+# ------------------------------------------------------------------------------
+# Phase Definition (UI schema)
+# ------------------------------------------------------------------------------
 PHASES = {
     "generate_questions": {
         "name": "Generate Quiz Questions",
         "fields": {
-            "title": {
-                "type": "text_input",
-                "label": "Enter the title of your module:",
-            },
+            "title": {"type": "text_input", "label": "Enter the title of your module:"},
             "module_lo": {
                 "type": "text_area",
                 "label": "Enter the module learning objective(s):",
@@ -219,19 +273,23 @@ PHASES = {
                 "label": "How many quiz questions would you like to generate?",
                 "min_value": 1,
                 "max_value": 10,
-                "value": 3
+                "value": 3,
             },
             "question_level": {
-                "type": "radio",  # Changed to radio button
+                "type": "radio",
                 "label": "Select the question level:",
                 "options": [
-                    "Lower Primary", "Middle Primary", "Upper Primary",
-                    "Lower Secondary", "Upper Secondary",
-                    "Undergraduate", "Postgraduate"
-                ]
+                    "Lower Primary",
+                    "Middle Primary",
+                    "Upper Primary",
+                    "Lower Secondary",
+                    "Upper Secondary",
+                    "Undergraduate",
+                    "Postgraduate",
+                ],
             },
             "output_format": {
-                "type": "radio",  # Changed to radio button
+                "type": "radio",
                 "label": "Select the output format:",
                 "options": [
                     "General Quiz Feedback",
@@ -240,100 +298,106 @@ PHASES = {
                     "Coursera Graded Quiz",
                     "H5P Textual Upload Feature",
                     "Open edX OLX Quiz",
-                    "NIC Quiz"
-                ]
+                    "NIC Quiz",
+                ],
             },
             "correct_ans_num": {
                 "type": "slider",
                 "label": "Number of correct answers per question:",
                 "min_value": 1,
                 "max_value": 4,
-                "value": 1
+                "value": 1,
             },
             "distractors_num": {
                 "type": "slider",
                 "label": "Number of distractors per question:",
                 "min_value": 1,
                 "max_value": 3,
-                "value": 1
+                "value": 1,
             },
             "text_input": {
                 "type": "text_area",
                 "label": "Enter the text or context for the quiz questions:",
-                "height": 500
-            }
+                "height": 500,
+            },
         },
-        "phase_instructions": """
-        Dynamically build the user prompt based on:
-        - Number of questions
-        - Selected question level
-        - Selected output format
-        """,
+        "phase_instructions": (
+            "Build the prompt dynamically based on number of questions, level, and output format."
+        ),
         "user_prompt": [
             {
                 "condition": {},
-                "prompt": "Please write {questions_num} multiple-choice question(s) for {question_level} level, each with {correct_ans_num} correct answer(s) and with {distractors_num} incorrect answers, based on the following text:\n{text_input}\n for {output_format}. Please align with the module title: {title} and the module learning objectives: {module_lo}."
-            },
-            {
-                "condition": {"output_format": True},
-                "prompt": "Align the questions with the {output_format} formatting.}"
+                "prompt": (
+                    "Please write {questions_num} multiple-choice question(s) for {question_level} level, each with {correct_ans_num} correct answer(s) and {distractors_num} distractor(s), "
+                    "based on the following text:\n{text_input}\n for {output_format}. Align with module title: {title} and learning objectives: {module_lo}."
+                ),
             }
         ],
         "ai_response": True,
         "allow_revisions": True,
         "show_prompt": True,
-        "read_only_prompt": False
+        "read_only_prompt": False,
     }
 }
 
+# ------------------------------------------------------------------------------
+# Model configuration
+# ------------------------------------------------------------------------------
 PREFERRED_LLM = "gpt-4o"
-LLM_CONFIG_OVERRIDE = {"gpt-4o": {
+LLM_CONFIG_OVERRIDE = {
+    "gpt-4o": {
         "family": "openai",
         "model": "gpt-4o",
         "temperature": 0.5,
         "top_p": 0.85,
         "frequency_penalty": 0.2,
-        "presence_penalty": 0.1
+        "presence_penalty": 0.1,
     }
 }
 
+# ------------------------------------------------------------------------------
+# Prompt Builder
+# ------------------------------------------------------------------------------
 
-SIDEBAR_HIDDEN = True
 
-# Prompt builder
-def build_user_prompt(user_input):
-    """
-    Build the user prompt dynamically based on user input.
-    """
+def build_user_prompt(user_input: dict) -> str:
+    """Construct dynamic quiz-generation prompt with example formatting alignment."""
     try:
-        # Retrieve the selected output format
         output_format = user_input.get("output_format", "")
-
-        # Fetch the corresponding example from get_output_format_conditions
-        output_conditions = get_output_format_conditions()
         example_text = next(
-            (condition["prompt"] for condition in output_conditions if condition["condition"].get("output_format") == output_format),
-            "No example available."
+            (
+                condition["prompt"]
+                for condition in get_output_format_conditions()
+                if condition["condition"].get("output_format") == output_format
+            ),
+            "No matching example found.",
         )
 
-        # Build the user prompt dynamically
         user_prompt_parts = [
-            config["prompt"].format(**{
-                key: user_input.get(key, ""),
-                "example_text": example_text
-            })
+            config["prompt"].format(
+                **{key: user_input.get(key, "") for key in user_input.keys()}
+            )
             for config in PHASES["generate_questions"]["user_prompt"]
-            if all(user_input.get(key) == value for key, value in config["condition"].items())
         ]
+        user_prompt_parts.append(example_text)
 
         return "\n".join(user_prompt_parts)
     except KeyError as e:
         raise ValueError(f"Missing key in user input: {e}")
 
-### Logout Button in Sidebar
-st.sidebar.button("Logout", on_click=lambda: st.session_state.update({"authenticated": False}))
 
-# Entry point
+# ------------------------------------------------------------------------------
+# UI Controls
+# ------------------------------------------------------------------------------
+SIDEBAR_HIDDEN = True
+st.sidebar.button(
+    "Logout", on_click=lambda: st.session_state.update({"authenticated": False})
+)
+
+# ------------------------------------------------------------------------------
+# Entrypoint (defer to shared engine)
+# ------------------------------------------------------------------------------
 from core_logic.main import main
+
 if __name__ == "__main__":
     main(config=globals())

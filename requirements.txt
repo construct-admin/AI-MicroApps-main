@@ -1,30 +1,96 @@
-openai>=1.40.0
-streamlit
-streamlit_extras
-st-gsheets-connection
-python-dotenv
-pandasql
-anthropic
-google-generativeai
-dnspython==2.6.1
+################################################################################
+# OES GenAI Micro-Apps — Requirements File (Modern LangChain + OpenAI SDK v2)
+# Maintained by: Imaad Fakier (Senior GenAI Developer)
+#
+# CONTEXT:
+# - This is the unified dependency layer for all NEW Streamlit-based micro-apps.
+# - Compatible with: LangChain 0.3+, OpenAI v2 responses API, MongoDB vector store.
+# - NOT backwards-compatible with LangChain 0.1–0.2 apps.
+#
+# IMPORTANT:
+# - Versions are intentionally pinned to avoid Streamlit Cloud or venv breakage.
+# - This stack uses LCEL (Runnable graph), OpenAI v2 SDK, and modern embeddings.
+# - Do NOT unpin without deliberate testing.
+################################################################################
+
+
+# ------------------------------------------------------------------------------
+# CORE RUNTIME
+# ------------------------------------------------------------------------------
+streamlit==1.39.0
+streamlit-extras==0.4.2
+python-dotenv==1.0.1
+
+pandas==2.2.2                    # aligns with numpy <2.0 ecosystem
+numpy==1.26.4                    # <2 avoids breakage in langchain/openai clients
+Pillow==10.4.0
+requests==2.32.5
+
+
+# ------------------------------------------------------------------------------
+# MODEL CLIENTS / LLM PROVIDERS (NEW VERSION CLIENTS)
+# ------------------------------------------------------------------------------
+openai==1.52.0                   # OpenAI v2 — responses API, embeddings, assistants
+anthropic==0.35.0                # Claude 3.x
+google-generativeai==0.8.3       # Gemini models
+tiktoken==0.7.0                  # token counting utilities
+
+
+# ------------------------------------------------------------------------------
+# LANGCHAIN ECOSYSTEM (LCEL GENERATION — 0.3+)
+# ------------------------------------------------------------------------------
+langchain==0.3.27
+langchain-core==0.3.79
+langchain-community==0.3.31
+langchain-text-splitters==0.3.11
+langchain-openai==0.2.3
+langchain-mongodb==0.7.2
+langsmith==0.3.45                 # telemetry / tracing (mandatory for LC 0.3.x)
+
+
+# ------------------------------------------------------------------------------
+# STORAGE & LOGGING BACKENDS
+# ------------------------------------------------------------------------------
 pymongo==4.8.0
-langchain-core==0.2.38
-langchain-openai==0.1.23
-langchain-mongodb==0.1.8
-langchain==0.2.16
-langchain-community==0.2.16
-pypdf>=3.0.0
-SQLAlchemy
-pymupdf
-python-docx
-opencv-python-headless
-numpy
-requests
-pillow
-pytesseract
-pysrt
-google-api-python-client
-google-auth
-google-auth-httplib2
-google-auth-oauthlib
-mammoth==1.7.0
+dnspython==2.6.1
+SQLAlchemy==2.0.36
+
+st-gsheets-connection==0.1.0
+pandasql==0.7.3
+
+
+# ------------------------------------------------------------------------------
+# FILE / DOCUMENT / PDF UTILITIES
+# ------------------------------------------------------------------------------
+pypdf==4.3.1
+pymupdf==1.24.9
+python-docx==1.1.2
+pysrt==1.1.2
+mammoth==1.7.0                    # DOCX → clean HTML conversions
+
+
+# ------------------------------------------------------------------------------
+# OCR / COMPUTER VISION
+# ------------------------------------------------------------------------------
+opencv-python-headless==4.10.0.84
+pytesseract==0.3.13
+
+
+# ------------------------------------------------------------------------------
+# GOOGLE CLOUD / AUTH STACK
+# ------------------------------------------------------------------------------
+google-api-python-client==2.154.0
+google-auth==2.35.0
+google-auth-httplib2==0.2.0
+google-auth-oauthlib==1.2.1
+
+# generativeai requires <6.0 protobuf
+protobuf==5.27.3
+
+
+# ------------------------------------------------------------------------------
+# OPTIONAL DEV TOOLING (LOCAL ONLY)
+# ------------------------------------------------------------------------------
+black==24.4.2
+flake8==7.0.0
+pyperclip==1.9.0

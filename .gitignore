@@ -1,9 +1,131 @@
-.env
-/venv
-.DS_Store
-.idea/
-.json_key.json
-secrets.toml
+################################################################################
+# .gitignore — OES GenAI Micro-Apps
+# Maintained by: Imaad Fakier (Senior GenAI Developer)
+# Context: Streamlit-based GenAI micro-apps (Alt Text Generator, Feedback Bot, etc.)
+################################################################################
+
+# ------------------------------------------------------------------------------
+# 🧱 Python / Virtual Environment
+# ------------------------------------------------------------------------------
+venv/
+.venv/
+env/
+ENV/
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+develop-eggs/
+.installed.cfg
+*.manifest
+*.spec
+
+# ------------------------------------------------------------------------------
+# 🔐 Environment / Secrets
+# ------------------------------------------------------------------------------
+.env
+.env.local
+.env.prod
+.env.development
+.env.test
+.env.backup
+*.key
+*.pem
+*.crt
+*.pfx
 *.db
+*.sqlite3
+
+# ------------------------------------------------------------------------------
+# ⚙️ Streamlit Cache / Logs
+# ------------------------------------------------------------------------------
+.streamlit/secrets.toml
+.streamlit/config.toml.bak
+.streamlit/logs/
+.streamlit/cache/
+.streamlit/uploads/
+.streamlit/static/
+
+# ------------------------------------------------------------------------------
+# 📦 Dependencies / Temporary Files
+# ------------------------------------------------------------------------------
+*.log
+*.bak
+*.tmp
+*.temp
+*.swp
+.DS_Store
+Thumbs.db
+.cache/
+.mypy_cache/
+.pytest_cache/
+.tox/
+.coverage
+coverage.xml
+htmlcov/
+
+# ------------------------------------------------------------------------------
+# 🧠 AI / Model Artifacts (vector embeddings, transcripts, outputs)
+# ------------------------------------------------------------------------------
+rag_docs/
+tmp_uploads/
+uploads/
+app_images/temp/
+*.embedding
+*.jsonl
+*.parquet
+*.npz
+*.npy
+
+# ------------------------------------------------------------------------------
+# 🧰 Dev Tools / IDEs
+# ------------------------------------------------------------------------------
+.vscode/
+.idea/
+*.code-workspace
+
+# ------------------------------------------------------------------------------
+# 🚀 Streamlit Deployment Artifacts
+# ------------------------------------------------------------------------------
+.streamlit/credentials.toml
+streamlit_app.log
+streamlit_app_debug.log
+.streamlit-logs.txt
+
+# ------------------------------------------------------------------------------
+# 📄 Notebook / Experimental Files
+# ------------------------------------------------------------------------------
+*.ipynb
+.ipynb_checkpoints/
+notebooks/
+experiments/
+sandbox/
+scratchpad/
+
+# ------------------------------------------------------------------------------
+# 🧩 Testing Outputs / Local Exports
+# ------------------------------------------------------------------------------
+__outputs__/
+test_output/
+debug_output/
+exports/
+*.csv
+*.xlsx
+*.ods
+*.tsv
+
+# ------------------------------------------------------------------------------
+# 🧾 System / OS-specific
+# ------------------------------------------------------------------------------
+.DS_Store
+Desktop.ini
+$RECYCLE.BIN/
+ehthumbs.db
+Icon?
+._*

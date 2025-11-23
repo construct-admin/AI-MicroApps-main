@@ -1,9 +1,0 @@
-OPENAI_API_KEY="sk-proj-xxxxxx"
-GOOGLE_API_KEY = "AIxxxxxx"
-CLAUDE_API_KEY = "sk-ant-xxxxxx"
-PERPLEXITY_API_KEY = "pplx-xxxxxx"
-# For RAG pipeline
-MONGO_DB_URI = "mongodb+srv://xxxxx/"
-DATABASE_NAME= "vectorDatabase"
-META_COLLECTION = "filesMetadata"
-EMBEDDINGS_COLLECTION = "vectorEmbeddings"
