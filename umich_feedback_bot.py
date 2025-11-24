@@ -1,13 +1,26 @@
 # ─────────────────────────────────────────────────────────────
-# Refactor date: 2025-11-12
-# 📘 OES GenAI App: Umich Feedback Bot
+# 📘 OES GenAI Micro-App: Umich Feedback Bot
+# Refactor date: 2025-11-24
 # Maintained by: Imaad Fakier (Senior GenAI Developer)
+#
 # Purpose:
-# Secure Streamlit micro-app for generating CAI-aligned elaborative feedback
-# for Yes/No quiz questions in the Umich course 'Justice and Equity in Technology Policy'.
-# This version retains *every* GPT call, regex, and function exactly as authored,
-# but is formatted and sectioned according to OES GenAI Streamlit standards.
+# Secure Streamlit micro-application for generating CAI-aligned elaborative
+# feedback for Yes/No quiz questions in the University of Michigan course
+# “Justice and Equity in Technology Policy.”
+#
+# Notes:
+# - This version preserves **all original GPT calls**, regex logic, and
+#   instructional parsing exactly as authored.
+# - The refactor applies the OES GenAI Streamlit standards:
+#     • .env-based secrets loading (dotenv)
+#     • SHA-256 access code authentication
+#     • Stable, explicit session state keys
+#     • Modular UI sections
+#     • Deterministic export behavior
+# - No behavioural changes to algorithmic logic; only formatting, architecture,
+#   and safety improvements.
 # ─────────────────────────────────────────────────────────────
+
 
 # ==============================================================
 # ⚙️ 1. Configuration & Environment Setup
