@@ -1,74 +1,186 @@
-<h1 align="center">AI MicroApps Template</h1>
+# 🧠 OES GenAI Micro-Apps — Production Repository
 
-<p align="center">
-  <a href="https://ai-microapps.streamlit.app">Gallery</a> &bull; <a href="https://jswope00.github.io/AI-MicroApps-Docs/">Documentation</a> &bull; <a href="https://www.youtube.com/@johnswope8421">YouTube</a>
-</p>
+**Last Updated:** 2025-11-24
+**Maintained by:** **Imaad Fakier — Senior GenAI Developer, OES**
 
-<p align="center">
-  AI Microapps are the simplest free way to build AI-powered web apps that you can personalize and share. 
-</p>
+This repository contains the **production-ready** suite of GenAI micro-applications used inside OES for internal operations, instructional design workflows, and accessibility support.
 
-<p>Let's explain with an ✨AI-powered✨ Haiku App</p>
+It represents the **final stable layer** of the OES GenAI ecosystem:
 
-<p>First, we configure about 10 lines to configure the app. Some lines configure two text fields to gather the users name and a favorite activity. The last line is the AI prompt that we'll send to AI with the user's input. It looks like this:</p>
+- audited,
+- security-aligned,
+- deterministic,
+- with tested UX,
+- and minimal moving parts.
 
-![image](https://github.com/user-attachments/assets/12c0f1e5-819c-4d6e-8587-4d66c3ba5a8b)
+---
 
-<p>Here is the app we get:</p>
+## 🚀 Purpose of This Repository
 
-![image](https://jswope00.github.io/AI-MicroApps-Docs/img/hello_world_app.gif)
+**AI-MicroApps-main is not a sandbox.**
 
-<p>So what next?</p>
-<p>Once you've mastered the basics, you can start building customized apps for those long, complicated prompts that you always have trouble remembering exactly how you did them. <i>And</i> you can share your apps with others, allowing them to quickly and intuitively use an AI chain that you've developed. </p>
-<p>AI Microapps was built by an educator for the education sector. It works well as either:</p>
-   <ul>
-      <li><strong>A course accelerator</strong> - Build and share your customized <a href="https://mcq-wizard.streamlit.app" target="_blank" alt="Multiple Choice Question Generator">Multiple Choice Question generators</a>, Lesson Plan Builders, <a href="https://alt-text.streamlit.app" target="_blank">Alt Text Wizards</a> and more. </li>
-      <li><strong>Assessment &amp; Feedback Tools</strong> - You can create AI-powered exercises for your students like an <a href="https://ai-debate.streamlit.app" target="_blank">AI Debate</a> tool about this week's lesson, or a <a href="https://critical-thinking.streamlit.app" target="_blank">critical thinking practice app</a> that is guided by your instruction. </li>
-   </ul>
-<p>AI MicroApps have nearly limitless customization capabilities and work with the most popular AI models, so you can make nearly any app and share it with anyone</p>
+It is the **deployment-ready** environment used by OES teams to:
 
-<p>Apps can be deployed to the web via <a href="https://streamlit.io/" target="_blank" alt="Streamlit Hosting">Streamlit</a> for free and nearly instantly.</p>
+- Run high-impact instructional and accessibility tools
+- Process Storyboards into Canvas courses
+- Generate learning assets for production delivery
+- Interact with vetted LLM pipelines
+- Support RAG-based workflows
+- Maintain enduring knowledge tools
 
-<p>Happy Building!</p>
+All apps here:
 
-## Demo Gallery
+- Follow OES GenAI architectural standards
+- Use our unified dependency stack
+- Implement secure access control
+- Include complete inline documentation
 
-[https://ai-microapps.streamlit.app](https://ai-microapps.streamlit.app)
+---
 
-## Quickstart Video & Docs
+## 📁 Repository Structure (production)
 
-Customize and deploy an app to the web in just a few minutes:
+Only currently active apps are kept here.
 
-[Quickstart Docs](https://jswope00.github.io/AI-MicroApps-Docs/quickstart/)
+```text
+AI-MicroApps-main/
+│
+├── app_alt_text_construct.py
+├── app_construct_lo_generator.py
+├── app_discussion_generator.py
+├── app_image_latex.py
+├── app_image_text.py
+├── app_mg_script_gen.py
+├── app_ptc_video_script_gen.py
+├── app_quiz_question_gen.py
+├── app_scenario_video_script.py
+├── umich_feedback_bot.py
+├── visual_transcripts.py
+│
+├── core_logic/
+│   ├── handlers.py
+│   ├── llm_config.py
+│   ├── main.py
+│   ├── rag_pipeline.py
+│   └── data_storage.py
+│
+├── app_images/
+├── rag_docs/
+├── shared_assets/
+│
+├── requirements.txt
+├── LICENSE
+└── README.md
+```
 
-## Building Apps
+---
 
-Create your own apps from Github without installing anything (easier) or from your local computer. 
+## 🧩 Core Production Apps
 
-[Build from Github](https://jswope00.github.io/AI-MicroApps-Docs/build_online/)
+| App                                   | Description                                                        |
+| ------------------------------------- | ------------------------------------------------------------------ |
+| **visual_transcripts.py**             | Precision transcript generator with SRT alignment and editable UX. |
+| **umich_feedback_bot.py**             | CAI-aligned elaborative feedback (Michigan pilot).                 |
+| **app_quiz_question_gen.py**          | Structured quiz generator; LO-aware.                               |
+| **app_discussion_generator.py**       | Canvas discussion prompts.                                         |
+| **app_construct_lo_generator.py**     | CLD-driven LO builder.                                             |
+| **app_alt_text_construct.py**         | WCAG accessibility alt-text generator.                             |
+| **image + latex suite**               | Converts image → structured instructional content.                 |
+| **scenario + micro-learning scripts** | Pre-tutorial content / instructional video generation.             |
 
-[Build from Local](https://jswope00.github.io/AI-MicroApps-Docs/build_local/)
+---
 
-## Deploying the Application
+## 🧱 Shared Architecture (Production Rules)
 
-Deploy your app to the web, for free, via Streamlit:
+### 1️⃣ Single shared core
 
-[Deploy an AI MicroApp](https://jswope00.github.io/AI-MicroApps-Docs/deploy/)
+All apps rely on:
 
-## Get Fancy
+```text
+core_logic/
+```
 
-Build more powerful apps with conditional logic, additional fields, and phases for different scenarios.
+Never duplicate logic.
 
-[AI MicroApp Phases, Fields, and Prompts](https://jswope00.github.io/AI-MicroApps-Docs/concept_phases_fields_runs/)
+### 2️⃣ Unified dependencies
 
-[AI MicroApp Phases](https://jswope00.github.io/AI-MicroApps-Docs/reference_phases/)
+Pinned + deterministic:
 
-[AI MicroApp Fields](https://jswope00.github.io/AI-MicroApps-Docs/reference_fields/)
+- OpenAI SDK v1
+- LangChain 0.3.x LCEL
+- MongoDB vector store architecture
 
-[AI MicroApp Prompts](https://jswope00.github.io/AI-MicroApps-Docs/reference_prompts/)
+### 3️⃣ Stable UI/UX
 
-## Requirements
+Apps must remain:
 
-- Python 3.8+
-- Streamlit
-- AI API Keys (currently, OpenAI, Claude, Gemini, and Perplexity are supported. Want to request other? Submit an issue.)
+- predictable,
+- minimally configurable,
+- accessible to non-technical users.
+
+### 4️⃣ Access control
+
+No unauthenticated usage.
+
+---
+
+## 🔐 Security Model
+
+Production secrets must never exist locally.
+
+Use:
+
+- Streamlit Secrets Manager
+- OES secure vault infrastructure
+- Environment-hashed access codes
+
+---
+
+## ⚙️ Deployment Expectations
+
+- Zero experimental code
+- No non-functional modules
+- No partial migrations
+- Every function fully documented
+
+---
+
+## 🔄 Promotion Path
+
+- **AI-MicroApps-test → AI-MicroApps-main**
+
+  - Only after:
+
+    - refactor is complete
+    - user feedback implemented
+    - architecture validated
+    - UX tested by LD stakeholders
+    - dependencies stabilized
+
+---
+
+## 🧭 Governance
+
+This repo falls under the umbrella of:
+
+- **Snowflake Ownership & Maintenance (OES GenAI)**
+
+  - All apps tracked as digital assets
+  - Standardized & auditable
+  - Attached to operational capacity models
+
+---
+
+## 📄 License
+
+Internal proprietary OES GenAI tooling.
+External use strictly prohibited.
+
+---
+
+## 💬 Maintainer
+
+**Imaad Fakier**
+Senior GenAI Developer — OES
+📧 [ifakier@oes.com](mailto:ifakier@oes.com)
+
+> **“Where instructional AI meets real production workflows.”**

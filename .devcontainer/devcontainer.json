@@ -1,33 +1,83 @@
+// ───────────────────────────────────────────────────────────────────────────────
+// 📦 OES GenAI Micro-Apps — Dev Container
+// Maintained by: Imaad Fakier (Senior GenAI Developer)
+// Purpose:
+// Consistent local/cloud environment for development, refactoring, and maintenance
+// of OES Streamlit-based GenAI micro-applications.
+//
+// WHY THIS EXISTS
+// - Avoids “it works on my machine” dependency drift.
+// - Installs pinned requirements automatically.
+// - Runs target Streamlit app immediately upon container attach.
+// - Ensures VS Code + GitHub Codespaces parity.
+//
+// ARCHITECTURE PRINCIPLES
+// - Python 3.11 (aligned to Streamlit Cloud + LangChain stability).
+// - User-based pip installs (no virtualenv needed).
+// - Only minimal extensions (Python + Pylance) to keep footprint lean.
+// - Auto-forward the Streamlit port (8501) into the preview pane.
+//
+// FILES RELIED ON (OPTIONAL)
+// - requirements.txt → sets Python/runtime dependencies.
+// - packages.txt → installs Linux-level packages (optional).
+//
+// IMPORTANT
+// - The `postAttachCommand` launches the default micro-app (LO Mapper).
+// - Change `app_lo_mapper.py` → another entrypoint when switching apps.
+// ───────────────────────────────────────────────────────────────────────────────
+
 {
+  // Visible name shown in Codespaces/VSCode
   "name": "Python 3",
-  // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
+
+  // Base container image (Ubuntu bullseye + Python 3.11)
+  // This keeps reproducible behaviour across developers and Codespaces.
   "image": "mcr.microsoft.com/devcontainers/python:1-3.11-bullseye",
+
   "customizations": {
+    // GitHub Codespaces UI hints
     "codespaces": {
-      "openFiles": [
-        "README.md",
-        "app_lo_mapper.py"
-      ]
+      // Automatically open these files when the workspace loads
+      "openFiles": ["README.md", "app_lo_mapper.py"]
     },
+
+    // VS Code extensions & environment customization
     "vscode": {
       "settings": {},
       "extensions": [
+        // Official Python extension with debugger, linting hooks
         "ms-python.python",
+        // Pylance → provides type intelligence + fast indexing
         "ms-python.vscode-pylance"
       ]
     }
   },
+
+  // Runs AFTER container builds OR dependencies are updated
+  //
+  // BEHAVIOUR:
+  // 1. If packages.txt exists → apt-get install native OS dependencies
+  // 2. If requirements.txt exists → pip install Python libs
+  // 3. Always install Streamlit to guarantee the UI engine exists
+  // 4. Output success indicator
   "updateContentCommand": "[ -f packages.txt ] && sudo apt update && sudo apt upgrade -y && sudo xargs apt install -y <packages.txt; [ -f requirements.txt ] && pip3 install --user -r requirements.txt; pip3 install --user streamlit; echo '✅ Packages installed and Requirements met'",
+
+  // Runs AFTER Codespace attaches.
+  // Effectively “auto dev server” behavior.
+  //
+  // Runs Streamlit in dev mode against target file.
   "postAttachCommand": {
     "server": "streamlit run app_lo_mapper.py --server.enableCORS false --server.enableXsrfProtection false"
   },
+
+  // Developer experience settings for port 8501
   "portsAttributes": {
     "8501": {
       "label": "Application",
       "onAutoForward": "openPreview"
     }
   },
-  "forwardPorts": [
-    8501
-  ]
+
+  // Forward ports externally — useful for local + GH Codespaces
+  "forwardPorts": [8501]
 }
