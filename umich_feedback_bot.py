@@ -1,4 +1,19 @@
-# umich_feedback_bot.py
+# ─────────────────────────────────────────────────────────────
+# Refactor date: 2025-11-12
+# 📘 OES GenAI App: Umich Feedback Bot
+# Maintained by: Imaad Fakier (Senior GenAI Developer)
+# Purpose:
+# Secure Streamlit micro-app for generating CAI-aligned elaborative feedback
+# for Yes/No quiz questions in the Umich course 'Justice and Equity in Technology Policy'.
+# This version retains *every* GPT call, regex, and function exactly as authored,
+# but is formatted and sectioned according to OES GenAI Streamlit standards.
+# ─────────────────────────────────────────────────────────────
+
+# ==============================================================
+# ⚙️ 1. Configuration & Environment Setup
+# ==============================================================
+
+
 import os
 import io
 from typing import List, Tuple
@@ -7,31 +22,37 @@ from dotenv import load_dotenv
 from openai import OpenAI
 import re
 
-# ─────────────────────────── Setup ───────────────────────────
+# Load environment and set page config
 load_dotenv()
-API_KEY = os.getenv("OPENAI_API_KEY", "")
-client = OpenAI(api_key=API_KEY) if API_KEY else None
 
-st.set_page_config(page_title="Umich Feedback Bot", page_icon="🎓", layout="centered")
+st.set_page_config(
+    page_title="Umich Feedback Bot",
+    page_icon="🎓",
+    layout="centered",
+    initial_sidebar_state="expanded",
+)
 
 ACCENT = "#F28C28"
 MAX_LEN = 8000
 MAX_PREVIEW_CHARS = 80_000
 
 
-# Lazy import to avoid startup errors if python-docx not installed
-def try_load_docx():
-    try:
-        import docx  # type: ignore
-
-        return docx
-    except Exception:
-        return None
+# ==============================================================
+# 🔐 2. API Key Validation
+# ==============================================================
 
 
-DOCX_MOD = try_load_docx()
+API_KEY = os.getenv("OPENAI_API_KEY", "")
+if not API_KEY:
+    st.error("⚠️ Missing OPENAI_API_KEY. Please add it to your .env file.")
+client = OpenAI(api_key=API_KEY) if API_KEY else None
 
-# ───────────────────────── SYSTEM SCAFFOLD ─────────────────────────
+
+# ==============================================================
+# 🧠 3. System Prompt (Scaffold)
+# ==============================================================
+
+
 SYSTEM_SCAFFOLD = """
 You are an instructional coach generating **CAI-aligned elaborative feedback** for *Yes/No* quiz questions in the course **Justice and Equity in Technology Policy**.
 
@@ -66,7 +87,24 @@ Produce feedback that reads like a thoughtful academic coach guiding reflection 
 """.strip()
 
 
-# ──────────────────────────── CLD Extraction ────────────────────────────
+# ==============================================================
+# 📄 3. DOCX Extraction & Parsing Utilities
+# ==============================================================
+
+
+# Lazy import of python-docx
+def try_load_docx():
+    try:
+        import docx  # type: ignore
+
+        return docx
+    except Exception:
+        return None
+
+
+DOCX_MOD = try_load_docx()
+
+
 def read_docx_bytes(file_bytes: bytes) -> Tuple[str, List[str]]:
     """Return full text and heading list from DOCX."""
     if not DOCX_MOD:
@@ -82,6 +120,11 @@ def read_docx_bytes(file_bytes: bytes) -> Tuple[str, List[str]]:
         if style_name.lower().startswith("heading"):
             headings.append(text)
     return "\n".join(all_lines), headings
+
+
+# ==============================================================
+# 🧩 4. GPT-Powered CLD Parsing Functions
+# ==============================================================
 
 
 def gpt_group_modules(raw_headings: List[str], raw_text: str) -> str:
@@ -131,14 +174,10 @@ Full Text (for context, truncated):
 
 
 def gpt_extract_section(section_names, full_text: str) -> str:
-    """
-    Extract a named section (e.g., 'Course Objectives', 'Assignment Instructions') from the CLD text.
-    Supports multiple fallback names and refuses to hallucinate.
-    """
+    """Extract named section (e.g., 'Course Objectives', 'Assignment Instructions') from CLD text."""
     if not client or not full_text.strip():
         return ""
 
-    # Accept single string or list
     if isinstance(section_names, str):
         section_names = [section_names]
 
@@ -177,14 +216,8 @@ Rules:
 
 
 def extract_assignment_instructions(full_text: str) -> str:
-    """
-    Extract assignment instructions from CLD text by scanning for known anchor patterns.
-    This approach avoids GPT hallucination and works even if headings aren't standardized.
-    """
-    # Normalize whitespace
+    """Extract assignment instructions from CLD text by scanning for known anchor patterns."""
     text = re.sub(r"\s+", " ", full_text)
-
-    # Common anchor phrases
     anchors = [
         r"<page_title>Discussion Prompt</page_title>",
         r"To sum up Module",
@@ -193,33 +226,27 @@ def extract_assignment_instructions(full_text: str) -> str:
         r"Reflection Prompt",
         r"Peer Review Assignment",
     ]
-
-    # Combine anchors into one regex pattern
     pattern = "(" + "|".join(anchors) + ")"
-
     match = re.search(pattern, text, flags=re.IGNORECASE)
     if not match:
         return ""
-
     start = match.start()
-
-    # Stop capturing when next module or page starts
     end_match = re.search(
         r"(<page_title>|Module [A-Z][a-z]+|</canvas_page>|End of Document)",
         text[start + 1 :],
         flags=re.IGNORECASE,
     )
-
     end = start + end_match.start() if end_match else len(text)
     section = text[start:end].strip()
-
-    # Cleanup XML-ish tags if present
     section = re.sub(r"</?[^>]+>", "", section)
-
     return section.strip()
 
 
-# ──────────────────────────── Feedback Generation ────────────────────────────
+# ==============================================================
+# 🧮 5. Feedback Generation Logic
+# ==============================================================
+
+
 def _build_context_block(
     course_objectives: str, assignment_block: str, topics_list: str
 ) -> str:
@@ -281,6 +308,11 @@ def generate_bulk_feedback(
         feedback = generate_feedback_for_one(q, context_block, model=model)
         outputs.append(feedback)
     return outputs
+
+
+# ==============================================================
+# 🧩 6. Utility Helpers
+# ==============================================================
 
 
 def lines_to_questions(text: str) -> List[str]:
@@ -374,7 +406,12 @@ def over_limit(s: str) -> bool:
     return len(s) > MAX_LEN
 
 
-# ──────────────────────────── UI ────────────────────────────
+# ==============================================================
+# 🧱 7. Streamlit UI Rendering
+# ==============================================================
+
+
+# ── Header ────────────────────────────────
 st.markdown(
     f"""
     <div style="text-align:center">
