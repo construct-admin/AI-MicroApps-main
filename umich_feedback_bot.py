@@ -22,6 +22,16 @@ from dotenv import load_dotenv
 from openai import OpenAI
 import re
 
+
+# ---- hotfix block ----
+def _block_streamlit_proxies():
+    for k in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy"]:
+        if k in os.environ:
+            del os.environ[k]
+
+
+_block_streamlit_proxies()
+
 # Load environment and set page config
 load_dotenv()
 
