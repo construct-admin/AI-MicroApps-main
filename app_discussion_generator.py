@@ -1,51 +1,92 @@
-import streamlit as st
+# ------------------------------------------------------------------------------
+# Refactor date: 2025-11-12
+# Refactored by: Imaad Fakier
+# Purpose: Align Discussion Generator micro-app with OES GenAI Streamlit standards.
+# ------------------------------------------------------------------------------
+"""
+Discussion Prompt Generator (Refactored)
+---------------------------------------
+Streamlit entrypoint for OES' Discussion Prompt Generator micro-app.
+
+Highlights in this refactor:
+- Introduces consistent `.env` handling via `dotenv`.
+- Adds SHA-256 access-code authentication aligned with other GenAI apps.
+- Documents helper functions and dynamic prompt building logic.
+- Preserves single-phase configuration with validation of required inputs.
+- Aligns with the unified OES Streamlit architecture (Alt-Text / Visual Transcripts / LO Generator pattern).
+
+This file is intentionally declarative — it defines configuration, auth, and UI metadata
+and defers orchestration to the shared `core_logic.main` engine for consistent behavior.
+"""
+
 import os
 import hashlib
+import streamlit as st
+from dotenv import load_dotenv
 
-# configuration must be at the top.
+# ------------------------------------------------------------------------------
+# Environment setup
+# ------------------------------------------------------------------------------
+load_dotenv()  # Load variables from .env so ACCESS_CODE_HASH and others are available
+
+# ------------------------------------------------------------------------------
+# Streamlit page configuration
+# ------------------------------------------------------------------------------
 st.set_page_config(
     page_title="Discussion Prompt Generator",
     page_icon="app_images/construct.webp",
     layout="centered",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-### hash code function for the encryption
-def hash_code(input_code):
-    """Hashes the access code using SHA-256."""
-    return hashlib.sha256(input_code.encode()).hexdigest()
 
-### retrieve hash code 
+# ------------------------------------------------------------------------------
+# Authentication utilities
+# ------------------------------------------------------------------------------
+def _hash_code(input_code: str) -> str:
+    """Hash an access code using SHA-256 for secure comparison.
+
+    We never store or compare plaintext; we compare the computed hash to
+    `ACCESS_CODE_HASH` from the environment / Streamlit secrets.
+    """
+    return hashlib.sha256(input_code.encode("utf-8")).hexdigest()
+
+
 ACCESS_CODE_HASH = os.getenv("ACCESS_CODE_HASH")
-
 if not ACCESS_CODE_HASH:
-    st.error("⚠️ Hashed access code not found. Please set ACCESS_CODE_HASH.")
+    st.error(
+        "⚠️ ACCESS_CODE_HASH not found in environment. "
+        "Ask Engineering for the hashed access code and set it in the deployment env."
+    )
     st.stop()
 
-### Authentication Logic
+# Initialize authentication state
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
+# Access control UI
 if not st.session_state.authenticated:
     st.title("🔒 Access Restricted")
-    access_code_input = st.text_input("Enter Access Code:", type="password")
-
-    if st.button("Submit"):
-        if hash_code(access_code_input) == ACCESS_CODE_HASH:
+    access_code_input = st.text_input(
+        "Enter Access Code:", type="password", key="access_code_input"
+    )
+    if st.button("Submit", key="submit_access_code"):
+        if _hash_code(access_code_input) == ACCESS_CODE_HASH:
             st.session_state.authenticated = True
-            st.rerun() 
+            st.rerun()
         else:
             st.error("Incorrect access code. Please try again.")
+    st.stop()  # Prevent unauthorized access beyond this point
 
-    st.stop()  # Prevent unauthorized access
-
-
+# ------------------------------------------------------------------------------
+# App metadata and configuration
+# ------------------------------------------------------------------------------
 APP_URL = "https://discussion.streamlit.app"
 APP_IMAGE = "construct.webp"
-PUBLISHED = True
+PUBLISHED = True  # Signals production-style behavior in the shared engine
 
 APP_TITLE = "Discussion Generator"
-APP_INTRO = """Use this application to generate discussion forum questions."""
+APP_INTRO = "Use this application to generate discussion forum questions."
 
 SYSTEM_PROMPT = """You are a discussion generator. Your goal is to develop structured discussion board prompts for online courses that align with user-provided learning objectives or content.
 
@@ -87,7 +128,9 @@ Use this example as a reference to generate similar prompts.
 
 """
 
-# Define phases and fields
+# ------------------------------------------------------------------------------
+# Phase definition and configuration schema
+# ------------------------------------------------------------------------------
 PHASES = {
     "generate_discussion": {
         "name": "Discussion Prompt Generator",
@@ -95,12 +138,12 @@ PHASES = {
             "learning_objectives": {
                 "type": "text_area",
                 "label": "Enter the relevant module-level learning objective(s):",
-                "height": 300
+                "height": 300,
             },
             "learning_content": {
                 "type": "text_area",
                 "label": "Enter the relevant learning content:",
-                "height": 500
+                "height": 500,
             },
             "academic_stage_radio": {
                 "type": "radio",
@@ -112,86 +155,103 @@ PHASES = {
                     "Lower Secondary",
                     "Upper Secondary",
                     "Undergraduate",
-                    "Postgraduate"
-                ]
-            }
+                    "Postgraduate",
+                ],
+            },
         },
-        "phase_instructions": """
-        Provide the relevant details (learning objectives, content, and academic stage) to generate a discussion prompt.
-        """,
+        "phase_instructions": (
+            "Provide the relevant details (learning objectives, content, and academic stage) to generate a discussion prompt."
+        ),
         "user_prompt": [
             {
                 "condition": {},
-                "prompt": "The discussion question should be aligned with the provided learning objectives: {learning_objectives}."
+                "prompt": "The discussion question should be aligned with the provided learning objectives: {learning_objectives}.",
             },
             {
                 "condition": {},
-                "prompt": "The discussion question should be aligned with the following learning content: {learning_content}."
+                "prompt": "The discussion question should be aligned with the following learning content: {learning_content}.",
             },
             {
                 "condition": {},
-                "prompt": "Please align the discussion question to the following academic stage level: {academic_stage_radio}."
-            }
+                "prompt": "Please align the discussion question to the following academic stage level: {academic_stage_radio}.",
+            },
         ],
         "ai_response": True,
         "allow_revisions": True,
         "show_prompt": True,
-        "read_only_prompt": False
+        "read_only_prompt": False,
     }
 }
 
-
+# ------------------------------------------------------------------------------
+# LLM and runtime configuration
+# ------------------------------------------------------------------------------
 PREFERRED_LLM = "gpt-4o"
-LLM_CONFIG_OVERRIDE = {"gpt-4o": {
+LLM_CONFIG_OVERRIDE = {
+    "gpt-4o": {
         "family": "openai",
         "model": "gpt-4o",
         "temperature": 0.5,
         "top_p": 0.85,
         "frequency_penalty": 0.2,
-        "presence_penalty": 0.1
+        "presence_penalty": 0.1,
     }
 }
 
 SIDEBAR_HIDDEN = True
 
+
+# ------------------------------------------------------------------------------
 # Prompt builder
-def build_user_prompt(user_input):
+# ------------------------------------------------------------------------------
+def build_user_prompt(user_input: dict) -> str:
+    """Dynamically assemble a single user prompt string from UI inputs.
+
+    Validates the three required inputs and then returns a newline-joined
+    prompt that the shared engine will send to the model.
+
+    Args:
+        user_input: Dict of values collected by the shared engine from UI fields.
+
+    Returns:
+        Newline-separated composite prompt string.
+
+    Raises:
+        ValueError: If any of the required inputs are missing.
     """
-    Dynamically build the user prompt with user-provided inputs.
-    """
-    try:
-        # Retrieve inputs
-        learning_objectives = user_input.get("learning_objectives", "").strip()
-        learning_content = user_input.get("learning_content", "").strip()
-        academic_stage = user_input.get("academic_stage_radio", "").strip()
+    # Retrieve and normalize inputs
+    learning_objectives = (user_input.get("learning_objectives", "") or "").strip()
+    learning_content = (user_input.get("learning_content", "") or "").strip()
+    academic_stage = (user_input.get("academic_stage_radio", "") or "").strip()
 
-        # Validate required inputs
-        if not learning_objectives:
-            raise ValueError("The 'Learning Objectives' field is required.")
-        if not learning_content:
-            raise ValueError("The 'Learning Content' field is required.")
-        if not academic_stage:
-            raise ValueError("An 'Academic Stage' must be selected.")
+    # Validate
+    if not learning_objectives:
+        raise ValueError("The 'Learning Objectives' field is required.")
+    if not learning_content:
+        raise ValueError("The 'Learning Content' field is required.")
+    if not academic_stage:
+        raise ValueError("An 'Academic Stage' must be selected.")
 
-        # Build the user prompt
-        user_prompt = [
-            f"The discussion question should be aligned with the provided learning objective: {learning_objectives}.",
-            f"The discussion question should be aligned with the following learning content: {learning_content}.",
-            f"Please align the learning objectives to the following academic stage level: {academic_stage}."
-        ]
-
-        # Combine the prompts
-        return "\n".join(user_prompt)
-
-    except KeyError as e:
-        raise ValueError(f"Missing key in user input: {e}")
+    # Compose
+    parts = [
+        f"The discussion question should be aligned with the provided learning objective: {learning_objectives}.",
+        f"The discussion question should be aligned with the following learning content: {learning_content}.",
+        f"Please align the learning objectives to the following academic stage level: {academic_stage}.",
+    ]
+    return "\n".join(parts)
 
 
-### Logout Button in Sidebar
-st.sidebar.button("Logout", on_click=lambda: st.session_state.update({"authenticated": False}))
+# ------------------------------------------------------------------------------
+# Sidebar controls
+# ------------------------------------------------------------------------------
+st.sidebar.button(
+    "Logout", on_click=lambda: st.session_state.update({"authenticated": False})
+)
 
-
-# Entry point
+# ------------------------------------------------------------------------------
+# Entrypoint (defer to shared engine)
+# ------------------------------------------------------------------------------
 from core_logic.main import main
+
 if __name__ == "__main__":
     main(config=globals())
