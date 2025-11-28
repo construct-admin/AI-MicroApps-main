@@ -1,111 +1,228 @@
-import hashlib
+# ------------------------------------------------------------------------------
+# Refactor date: 2025-11-16
+# Refactored by: Imaad Fakier
+#
+# Purpose:
+#   End-to-end RAG pipeline foundation using:
+#       • MongoDB Atlas Vector Search
+#       • LangChain 0.3+ LCEL architecture
+#       • OpenAI embeddings + ChatOpenAI
+#
+# Why this module exists:
+#   - Centralises PDF ingestion, metadata hashing, chunking, and embedding flow.
+#   - Provides a safe “check before embed” behaviour using SHA-256 fingerprinting.
+#   - Creates a minimal + reliable retrieval chain for RAG micro-apps.
+#   - Ensures micro-apps do not duplicate embedding logic.
+#
+# Notes for maintainers:
+#   • This module assumes LangChain 0.3+ generation.
+#   • Embeddings use OpenAIEmbeddings → required for Atlas Vector Search.
+#   • Retrieval uses standard LCEL `{ context, question }` pattern.
+#   • This module does NOT define the RAG handler (that lives in handlers.py).
+#
+# Future-proofing:
+#   ✔ Single place to upgrade embeddings model
+#   ✔ Ready for multimodal future ingestion (OCR pipeline can slot in)
+#   ✔ Supports streaming LLM outputs if needed (LCEL ready)
+# ------------------------------------------------------------------------------
+
 import os
 import uuid
+import hashlib
+from dotenv import load_dotenv
+
 from pymongo import MongoClient
-from langchain_openai import OpenAIEmbeddings
+
+# LangChain (Modern 0.3+)
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_mongodb import MongoDBAtlasVectorSearch
-from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_openai.chat_models import ChatOpenAI
+from langchain_community.document_loaders import PyPDFLoader  # type: ignore
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
-from langchain_community.callbacks.manager import get_openai_callback
-from dotenv import load_dotenv
+from langchain_community.callbacks import get_openai_callback  # type: ignore
 
+# ----------------------------------------------------------------------
+# Environment loading
+# ----------------------------------------------------------------------
 load_dotenv()
 
-# Load environment variables
-mongo_uri = os.getenv('MONGO_DB_URI', 'undefined')
-db_name = os.getenv('DATABASE_NAME', 'undefined')
-files_metadata = os.getenv('META_COLLECTION', 'undefined')
-embeddings_collection = os.getenv('EMBEDDINGS_COLLECTION', 'undefined')
+mongo_uri = os.getenv("MONGO_DB_URI")
+db_name = os.getenv("DATABASE_NAME")
+files_metadata_collection_name = os.getenv("META_COLLECTION")
+embeddings_collection_name = os.getenv("EMBEDDINGS_COLLECTION")
+openai_api_key = os.getenv("OPENAI_API_KEY")
 
-# Initialize MongoDB connection
+if not mongo_uri:
+    raise RuntimeError("Missing MONGO_DB_URI environment variable.")
+if not db_name:
+    raise RuntimeError("Missing DATABASE_NAME environment variable.")
+if not files_metadata_collection_name:
+    raise RuntimeError("Missing META_COLLECTION environment variable.")
+if not embeddings_collection_name:
+    raise RuntimeError("Missing EMBEDDINGS_COLLECTION environment variable.")
+if not openai_api_key:
+    raise RuntimeError("Missing OPENAI_API_KEY environment variable.")
+
+# ----------------------------------------------------------------------
+# MongoDB initialisation
+# ----------------------------------------------------------------------
 client = MongoClient(mongo_uri)
 db = client[db_name]
-files_metadata = db[files_metadata]
-collection = db[embeddings_collection]
-openai_api_key = os.getenv("OPENAI_API_KEY")
+
+files_metadata = db[files_metadata_collection_name]
+embeddings_collection = db[embeddings_collection_name]
 
 ATLAS_VECTOR_SEARCH_INDEX_NAME = "vector_index"
 
-# Initialize OpenAI embeddings
-embeddings_model = OpenAIEmbeddings(openai_api_key=os.getenv('OPENAI_API_KEY'))
+# ----------------------------------------------------------------------
+# Embeddings model (OpenAI)
+#   • Uses LC v0.3+ standard OpenAIEmbeddings wrapper
+# ----------------------------------------------------------------------
+embeddings_model = OpenAIEmbeddings(openai_api_key=openai_api_key)
 
 
-def get_file_hash(file_path):
-    """Generate a SHA-256 hash for the file."""
+# ==============================================================================
+#  SECTION 1 — Metadata Hashing & File Tracking
+# ==============================================================================
+
+
+def get_file_hash(file_path: str) -> str:
+    """
+    Compute SHA-256 digest of a file.
+
+    Used to detect if a PDF has already been embedded.
+    """
     hash_func = hashlib.sha256()
-    with open(file_path, 'rb') as f:
+    with open(file_path, "rb") as f:
         while chunk := f.read(8192):
             hash_func.update(chunk)
     return hash_func.hexdigest()
 
 
-def check_and_store_metadata_and_embeddings(file_path):
+def check_and_store_metadata_and_embeddings(file_path: str) -> str:
     """
-    Check if the file metadata (hash and name) and embeddings exist.
-    If not, store them in MongoDB and generate embeddings.
+    Main ingestion entrypoint.
+
+    1. Hash the file.
+    2. If hash does not exist in metadata:
+         • Load & chunk PDF
+         • Generate embeddings
+         • Store chunks + embeddings in MongoDB
+    3. If metadata exists, skip embedding stage.
+
+    Returns:
+        str: Status message describing the action taken.
     """
-    # Step 1: Calculate the file hash
     file_hash = get_file_hash(file_path)
 
-    # Step 2: Check and store metadata and embeddings
-    if files_metadata.find_one({"filehash": file_hash}) is None:
-        files_metadata.insert_one(
-            {"_id": uuid.uuid4().hex, "filename": os.path.basename(file_path), "filehash": file_hash})
-        print(f"File metadata stored for {os.path.basename(file_path)}")
-
-        # Load the PDF and split text into chunks
-        loader = PyPDFLoader(file_path)
-        data = loader.load()
-        print(data)
-
-        # Split the documents into manageable chunks
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=100)
-        chunks = text_splitter.split_documents(data)
-
-        # Store the chunks and embeddings into MongoDB
-        MongoDBAtlasVectorSearch.from_documents(
-            documents=chunks,
-            embedding=embeddings_model,
-            collection=collection,
-            index_name=ATLAS_VECTOR_SEARCH_INDEX_NAME
-        )
-        return "Embeddings created and stored successfully."
-    else:
+    # Metadata check
+    metadata = files_metadata.find_one({"filehash": file_hash})
+    if metadata is not None:
         return "File metadata already exists."
 
-    return file_hash
+    # Store metadata entry
+    files_metadata.insert_one(
+        {
+            "_id": uuid.uuid4().hex,
+            "filename": os.path.basename(file_path),
+            "filehash": file_hash,
+        }
+    )
+    print(f"Stored metadata for {os.path.basename(file_path)}")
 
-def format_docs(docs):
-    """Concatenate the content of retrieved documents into a single string."""
+    # Load PDF
+    loader = PyPDFLoader(file_path)
+    documents = loader.load()
+    print(f"Loaded {len(documents)} documents from PDF.")
+
+    # Chunking
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=300,
+        chunk_overlap=100,
+    )
+    chunks = splitter.split_documents(documents)
+
+    # Store embeddings in Atlas Vector Search
+    MongoDBAtlasVectorSearch.from_documents(
+        documents=chunks,
+        embedding=embeddings_model,
+        collection=embeddings_collection,
+        index_name=ATLAS_VECTOR_SEARCH_INDEX_NAME,
+    )
+
+    return "Embeddings created and stored successfully."
+
+
+# ==============================================================================
+#  SECTION 2 — Retrieval Formatting
+# ==============================================================================
+
+
+def format_docs(docs) -> str:
+    """
+    Merge retrieved documents into a single formatted string.
+    """
     return "\n\n".join(doc.page_content for doc in docs)
 
-# Function to retrieve and generate response
-def retrieve_and_generate_response(question, template_text):
+
+# ==============================================================================
+#  SECTION 3 — Retrieval + Generation Pipeline (RAG)
+# ==============================================================================
+
+
+def retrieve_and_generate_response(question: str, template_text: str):
     """
-    Retrieves relevant documents from MongoDB and generates a response using OpenAI.
+    Execute a full RAG cycle:
+
+    1. Vector search in MongoDB Atlas (similarity search)
+    2. Prepare LCEL pipeline:
+         • { context, question }
+         • PromptTemplate
+         • ChatOpenAI
+         • OutputParser
+    3. Track OpenAI cost using callback manager.
+
+    Returns:
+        (response_text, total_cost_usd)
     """
-    # Vector search to retrieve relevant documents
-    vector_search = MongoDBAtlasVectorSearch(collection=collection,index_name=ATLAS_VECTOR_SEARCH_INDEX_NAME,embedding=embeddings_model)
-    retriever = vector_search.as_retriever(search_type="similarity",search_kwargs={"k": 1})
-    prompt = PromptTemplate.from_template(template=template_text)
-    output_parser = StrOutputParser()
-    model = ChatOpenAI(api_key=openai_api_key, model_name='gpt-4o', temperature=0.7)
-    # Build the retrieval and generation pipeline
-    retrieval_chain = (
-            {"context": retriever | format_docs, "question": RunnablePassthrough()}
-            | prompt
-            | model
-            | output_parser
+    # Build retriever
+    vector_search = MongoDBAtlasVectorSearch(
+        collection=embeddings_collection,
+        index_name=ATLAS_VECTOR_SEARCH_INDEX_NAME,
+        embedding=embeddings_model,
     )
-    # Track cost using OpenAI callback
-    with get_openai_callback() as cb_rag:
-        rag_response = retrieval_chain.invoke(question)
-        rag_cost = cb_rag.total_cost
-    return rag_response, rag_cost
 
+    retriever = vector_search.as_retriever(
+        search_type="similarity",
+        search_kwargs={"k": 1},
+    )
 
+    # Prompt
+    prompt = PromptTemplate.from_template(template_text)
 
+    # Model
+    model = ChatOpenAI(
+        api_key=openai_api_key,
+        model_name="gpt-4o",
+        temperature=0.7,
+    )
+
+    # LCEL chain
+    chain = (
+        {
+            "context": retriever | format_docs,
+            "question": RunnablePassthrough(),
+        }
+        | prompt
+        | model
+        | StrOutputParser()
+    )
+
+    # Cost tracking
+    with get_openai_callback() as cb:
+        response = chain.invoke(question)
+        cost = cb.total_cost
+
+    return response, cost
