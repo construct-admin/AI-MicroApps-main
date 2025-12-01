@@ -1,5 +1,5 @@
 # ------------------------------------------------------------------------------
-# Refactor date: 2025-11-23
+# Refactor date: 2025-12-01
 # Refactored by: Imaad Fakier
 # Purpose: Ultimate Visual Transcripts Generator aligned to Coursera/Berkeley use case.
 # ------------------------------------------------------------------------------
@@ -37,6 +37,7 @@ import streamlit as st
 from PIL import Image
 from docx import Document
 from dotenv import load_dotenv
+from streamlit_cropper import st_cropper
 
 # ------------------------------------------------------------------------------
 # Page setup and environment loading
@@ -396,11 +397,22 @@ if st.session_state.get("video_ready", False) and st.session_state.video_path:
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         current_pil_image = Image.fromarray(frame_rgb)
 
-        st.image(
+        # Allow user to crop/select a region of the frame
+        st.markdown("### Select region to use for visual transcript")
+
+        cropped_img = st_cropper(
             current_pil_image,
-            caption=f"Frame {frame_number} (Step index {step_index})",
-            use_column_width=True,
+            realtime_update=True,
+            box_color="#FF0000",  # Red selection box
+            aspect_ratio=None,  # Allows free-form selection
         )
+
+        # Show the cropped output below the cropper
+        st.image(cropped_img, caption="Cropped Region", use_column_width=True)
+
+        # Use cropped image instead of full frame
+        current_pil_image = cropped_img
+
         current_seconds = frame_number / max(st.session_state["fps"], 1)
         current_timestamp = seconds_to_timestamp(current_seconds)
         st.info(f"Timestamp: `{current_timestamp}`")
@@ -432,81 +444,113 @@ if st.session_state.get("video_ready", False) and st.session_state.video_path:
                 "seconds": seconds,
                 "timestamp": timestamp,
                 "subtitle": subtitle_text,
-                "image": current_pil_image,
+                "image": current_pil_image,  # ← this now includes the cropped region
                 "visual_text": "",
             }
+
             st.session_state["annotations"].append(annotation)
             st.success(f"Saved frame {frame_number} at {timestamp} for annotation.")
+            st.rerun()
+
 
 # ------------------------------------------------------------------------------
 # Sidebar: Saved frames + in-app editing + GPT vision assistance
 # ------------------------------------------------------------------------------
-st.sidebar.subheader("🖼 Saved Frames & Visual Transcripts")
+# NOTE:
+#   - This panel is placed directly in st.sidebar (NO expanders around it),
+#     because sidebar expanders suppress vertical scrolling.
+#   - Each annotation block (image + text + GPT assist) is displayed in order.
+#   - All widgets receive stable session_state keys to avoid UI jitter.
+# ------------------------------------------------------------------------------
 
-if not st.session_state["annotations"]:
-    st.sidebar.info(
-        "Use the main panel to navigate the video and click 'Save this frame' "
-        "to start building your visual transcript."
-    )
-else:
-    base_prompt = (
-        "You are helping create visual descriptions for a course's accessibility "
-        "materials. Describe only the key visual elements and on-screen text that are "
-        "important for understanding the learning content. Write in a neutral, "
-        "descriptive tone suitable for screen readers."
-    )
+with st.sidebar:  # Ensures proper scroll behavior
+    st.subheader("🖼 Saved Frames & Visual Transcripts")
 
-    for i, ann in enumerate(st.session_state["annotations"]):
-        st.sidebar.markdown("---")
-        st.sidebar.image(
-            ann["image"],
-            caption=f"Frame {ann['frame_index']} @ {ann['timestamp']}",
-            use_column_width=True,
+    # If no frames have been saved yet, show guidance text.
+    if not st.session_state["annotations"]:
+        st.info(
+            "Use the main panel to navigate the video and click 'Save this frame' "
+            "to start building your visual transcript."
         )
 
-        if ann["subtitle"] and ann["subtitle"] != "No subtitle":
-            st.sidebar.caption(f"**SRT**: {ann['subtitle']}")
-        else:
-            st.sidebar.caption("_No matching subtitle for this time._")
-
-        text_key = f"vt_text_{i}"
-        # Bootstrap session_state for this text area
-        if text_key not in st.session_state:
-            st.session_state[text_key] = ann.get("visual_text", "")
-
-        st.sidebar.write("Visual transcript (editable):")
-        st.sidebar.text_area(
-            label="",
-            key=text_key,
-            height=120,
+    else:
+        # Base prompt for GPT-4o vision assistance
+        base_prompt = (
+            "You are helping create visual descriptions for a course's accessibility "
+            "materials. Describe only the key visual elements and on-screen text that "
+            "are important for understanding the learning content. Write in a neutral, "
+            "descriptive tone suitable for screen readers."
         )
-        # Sync back into annotation
-        ann["visual_text"] = st.session_state[text_key]
 
-        btn_cols = st.sidebar.columns([1, 1])
-        with btn_cols[0]:
-            if st.button(f"✨ GPT assist #{i+1}", key=f"gpt_btn_{i}"):
-                try:
-                    with st.spinner("Calling GPT-4o vision…"):
-                        response = describe_image_with_gpt(
-                            ann["image"],
-                            base_prompt=base_prompt,
-                            word_limit=int(st.session_state["vt_word_limit"]),
-                        )
-                    st.session_state[text_key] = response
-                    ann["visual_text"] = response
-                    st.sidebar.success("Updated from GPT-4o.")
-                except Exception as e:
-                    st.sidebar.error(f"Error calling GPT: {e}")
+        # Loop through all saved frame annotations
+        for i, ann in enumerate(st.session_state["annotations"]):
+            st.markdown("---")
 
-        with btn_cols[1]:
-            if st.button(f"🗑 Remove #{i+1}", key=f"del_btn_{i}"):
-                # Remove this annotation and its text key
-                del st.session_state["annotations"][i]
-                if text_key in st.session_state:
-                    del st.session_state[text_key]
-                st.sidebar.warning(f"Removed frame #{i+1} from annotations.")
-                st.rerun()
+            # Display the saved frame image
+            st.image(
+                ann["image"],
+                caption=f"Frame {ann['frame_index']} @ {ann['timestamp']}",
+                use_column_width=True,
+            )
+
+            # Show nearest SRT subtitle if applicable
+            if ann["subtitle"] and ann["subtitle"] != "No subtitle":
+                st.caption(f"**SRT**: {ann['subtitle']}")
+            else:
+                st.caption("_No matching subtitle for this time._")
+
+            # KEY for the text area — keeps user edits persistent across reruns
+            text_key = f"vt_text_{i}"
+
+            # Bootstrap session_state for text area (only once)
+            if text_key not in st.session_state:
+                st.session_state[text_key] = ann.get("visual_text", "")
+
+            # Editable visual transcript text area
+            st.write("Visual transcript (editable):")
+            st.text_area(
+                label="",
+                key=text_key,
+                height=120,
+            )
+
+            # Sync text area → annotation object
+            ann["visual_text"] = st.session_state[text_key]
+
+            # Two-column row: GPT Assist + Remove
+            btn_cols = st.columns([1, 1])
+
+            # ------------------------------------------------------------------
+            # GPT-4o Vision Assistance for this frame
+            # ------------------------------------------------------------------
+            with btn_cols[0]:
+                if st.button(f"✨ GPT assist #{i+1}", key=f"gpt_btn_{i}"):
+                    try:
+                        with st.spinner("Calling GPT-4o vision…"):
+                            response = describe_image_with_gpt(
+                                ann["image"],
+                                base_prompt=base_prompt,
+                                word_limit=int(st.session_state["vt_word_limit"]),
+                            )
+                        # Update UI + annotation
+                        st.session_state[text_key] = response
+                        ann["visual_text"] = response
+                        st.success("Updated from GPT-4o.")
+                    except Exception as e:
+                        st.error(f"Error calling GPT: {e}")
+
+            # ------------------------------------------------------------------
+            # Remove this saved frame + its text field
+            # ------------------------------------------------------------------
+            with btn_cols[1]:
+                if st.button(f"🗑 Remove #{i+1}", key=f"del_btn_{i}"):
+                    # Remove annotation and its associated text area state
+                    del st.session_state["annotations"][i]
+                    if text_key in st.session_state:
+                        del st.session_state[text_key]
+
+                    st.warning(f"Removed frame #{i+1} from annotations.")
+                    st.rerun()  # Refresh sidebar immediately to reflect change
 
 
 # ------------------------------------------------------------------------------
