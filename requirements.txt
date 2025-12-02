@@ -19,7 +19,7 @@
 # ------------------------------------------------------------------------------
 streamlit==1.39.0
 streamlit-extras==0.4.2
-streamlit-cropper==0.1.0
+streamlit-cropper>=0.3.1         # image cropping widget for Streamlit
 python-dotenv==1.0.1
 
 pandas==2.2.2                    # aligns with numpy <2.0 ecosystem
