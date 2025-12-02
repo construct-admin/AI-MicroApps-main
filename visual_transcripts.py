@@ -371,11 +371,14 @@ if st.session_state.get("video_ready", False) and st.session_state.video_path:
 
     col_nav_1, col_nav_2 = st.columns([3, 1])
     with col_nav_1:
+        # Prevent invalid slider bounds
+        safe_max = max(1, max_step_index)
+
         step_index = st.slider(
             "Select frame position (stepping by configured frame step)",
             min_value=0,
-            max_value=max_step_index,
-            value=st.session_state["frame_index"],
+            max_value=safe_max,
+            value=min(st.session_state["frame_index"], safe_max),
         )
     with col_nav_2:
         st.write(f"Total frames: `{total_frames}`")
