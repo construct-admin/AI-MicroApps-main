@@ -41,6 +41,11 @@ import httpx
 from openai import OpenAI
 
 # ------------------------------------------------------------------------------
+# PAGE SETUP + ENV VARIABLES
+# ------------------------------------------------------------------------------
+st.set_page_config(page_title="VT Generator", page_icon="🖼️", layout="wide")
+
+# ------------------------------------------------------------------------------
 # GLOBAL CSS PATCH: Fix Streamlit sidebar scroll disappearing
 # ------------------------------------------------------------------------------
 # This addresses the issue Marochelle noted where the sidebar scrolling becomes
@@ -63,10 +68,6 @@ section[data-testid="stSidebar"] > div:first-child {
     unsafe_allow_html=True,
 )
 
-# ------------------------------------------------------------------------------
-# PAGE SETUP + ENV VARIABLES
-# ------------------------------------------------------------------------------
-st.set_page_config(page_title="VT Generator", page_icon="🖼️", layout="wide")
 load_dotenv()
 
 APP_TITLE = "Visual Transcripts Generator"
