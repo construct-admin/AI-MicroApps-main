@@ -1,7 +1,54 @@
-streamlit>=1.36.0
-requests>=2.31.0
-python-docx>=1.1.0
-google-api-python-client>=2.133.0
-google-auth>=2.29.0
-google-auth-httplib2>=0.2.0
-openai>=1.13.0,<2
+################################################################################
+# OES GenAI Micro-App — Unified Requirements (App-Level)
+# Maintained by: Imaad Fakier (Senior GenAI Developer)
+#
+# IMPORTANT:
+# - This app inherits the modern ecosystem requirements.
+# - DO NOT loosen versions; Streamlit Cloud will break.
+################################################################################
+
+# --- CORE RUNTIME ----
+streamlit==1.39.0
+python-dotenv==1.0.1
+requests==2.32.5
+pandas==2.2.2
+numpy==1.26.4
+Pillow==10.4.0
+
+# --- MODEL CLIENTS / LLM PROVIDERS ---
+openai==1.52.0                    # OpenAI v2 (responses API, embeddings v2)
+anthropic==0.35.0
+google-generativeai==0.8.3
+tiktoken==0.7.0
+
+# --- LANGCHAIN LCEL ECOSYSTEM ---
+langchain==0.3.27
+langchain-core==0.3.79
+langchain-community==0.3.31
+langchain-text-splitters==0.3.11
+langchain-openai==0.2.3
+langchain-mongodb==0.7.2
+langsmith==0.3.45
+
+# --- GOOGLE CLIENT STACK (PINNED BOUNDARIES) ---
+google-api-python-client==2.154.0
+google-auth==2.35.0
+google-auth-httplib2==0.2.0
+google-auth-oauthlib==1.2.1
+protobuf==5.27.3                  # must stay <6.0.0
+
+# --- DOCX / TRANSCRIPTS ---
+python-docx==1.1.2
+pysrt==1.1.2
+mammoth==1.7.0
+
+# --- OCR / MEDIA PROCESSING ---
+opencv-python-headless==4.10.0.84
+pytesseract==0.3.13
+
+# --- MONGODB / LOGGING ---
+pymongo==4.8.0
+dnspython==2.6.1
+SQLAlchemy==2.0.36
+st-gsheets-connection==0.1.0
+pandasql==0.7.3
