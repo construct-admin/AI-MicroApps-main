@@ -507,10 +507,22 @@ with st.sidebar:
                 st.caption(f"SRT: {ann['subtitle']}")
 
             key = f"vt_text_{i}"
+
+            # Initialize widget state on first load
             if key not in st.session_state:
                 st.session_state[key] = ann["visual_text"]
 
+            # --- Hydrate widget from pending GPT Assist update ---
+            pending_key = f"pending_update_{key}"
+            if pending_key in st.session_state:
+                st.session_state[key] = st.session_state[pending_key]
+                del st.session_state[pending_key]
+            # ------------------------------------------------------
+
+            # Now safe to draw the widget — value is preloaded BEFORE instantiation
             st.text_area("Description:", key=key, height=120)
+
+            # Sync widget → annotation object
             ann["visual_text"] = st.session_state[key]
 
             c1, c2 = st.columns(2)
@@ -523,9 +535,14 @@ with st.sidebar:
                                 base_prompt,
                                 st.session_state.vt_word_limit,
                             )
-                            st.session_state[key] = resp
+
+                            # Store result in annotation, NOT directly into widget key
                             ann["visual_text"] = resp
-                            st.success("Updated.")
+
+                            # Save into a temporary session key to hydrate the widget on rerun
+                            st.session_state[f"pending_update_{key}"] = resp
+
+                            st.rerun()
                     except Exception as e:
                         st.error(f"GPT Assist failed: {e}")
             with c2:
