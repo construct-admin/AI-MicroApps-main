@@ -53,20 +53,35 @@ st.set_page_config(page_title="VT Generator", page_icon="🖼️", layout="wide"
 st.markdown(
     """
 <style>
-/* Force sidebar scroll to always be visible in older Streamlit versions */
-section[data-testid="stSidebar"] .css-1y4p8pa {
-    overflow-y: scroll !important;
+
+/* Force sidebar container to ALWAYS allow scrolling */
+section[data-testid="stSidebar"] {
+    overflow: visible !important;
 }
 
-/* Streamlit ≥1.33 uses this layout structure */
-section[data-testid="stSidebar"] > div:first-child {
+/* Streamlit sidebar main scrollable area */
+section[data-testid="stSidebar"] div[data-testid="stSidebarContent"] {
+    overflow-y: auto !important;
+    height: 100vh !important;
+    padding-right: 12px !important; /* makes scrollbar always clickable */
+}
+
+/* Some Streamlit versions use this instead */
+section[data-testid="stSidebar"] .css-1d391kg {
     overflow-y: auto !important;
     height: 100vh !important;
 }
+
+/* Force all nested containers to not clip scrollbars */
+section[data-testid="stSidebar"] * {
+    overflow: visible !important;
+}
+
 </style>
 """,
     unsafe_allow_html=True,
 )
+
 
 load_dotenv()
 
