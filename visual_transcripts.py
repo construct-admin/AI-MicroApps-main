@@ -1,27 +1,44 @@
 # ------------------------------------------------------------------------------
-# Refactor date: 2025-12-01
-# Refactored by: Imaad Fakier
-# Purpose: Ultimate Visual Transcripts Generator aligned to Coursera/Berkeley use case.
+# Visual Transcripts Generator (v2.1)
 # ------------------------------------------------------------------------------
-"""
-Visual Transcripts Generator (v2)
----------------------------------
-Streamlit entrypoint for OES' Visual Transcripts micro-app.
-
-Design goals (from Marochelle + Christo huddles):
-- SRT file remains REQUIRED as the timeline backbone (Berkeley workflow).
-- Video is navigated in frame "steps" (e.g. every 50 / 200 frames) instead of every frame.
-- Users can select and save specific frames for which they want visual transcripts.
-- Each saved frame is:
-    • time-stamped
-    • aligned to the nearest SRT caption
-    • editable directly IN-APP (no forced Word-only editing)
-- GPT-4o Vision is used to assist with visual descriptions, respecting a word limit.
-- Final output is a .docx "Visual Transcript" document ordered by timeline.
-
-This file follows the same documentation and style standards as the
-Alt-Text Generator refactor for consistency across OES GenAI micro-apps.
-"""
+# Refactor date: 2025-12-09
+# Refactored by: Imaad Fakier
+#
+# Purpose
+# -------
+# Streamlit entrypoint for OES' Visual Transcripts micro-app, aligned with the
+# Coursera/Berkeley accessibility workflow and the behaviour of the “localhost”
+# VT demo used by Marochelle.
+#
+# Key design goals
+# ----------------
+# - SRT file is REQUIRED and acts as the master timeline.
+# - Users navigate the video in frame *steps* (e.g. every 50 frames).
+# - Users can:
+#     • Save specific frames.
+#     • Crop the frame (rectangle) or use the full frame.
+#     • Request GPT-4o Vision assistance per frame.
+#     • Edit visual descriptions directly in-app.
+# - Multiple saved frames can be used; each has:
+#     • Frame index
+#     • Exact timestamp (HH:MM:SS.mmm)
+#     • Nearest SRT caption + its start time
+#     • User-editable visual transcript text
+# - Export generates a **combined audio + visual transcript (.docx)**:
+#     • Full SRT timeline in order.
+#     • Visual descriptions injected under the relevant captions.
+#
+# Security / Ops
+# --------------
+# - Access control via a hashed access code (ACCESS_CODE_HASH env var).
+# - OpenAI API key from OPENAI_API_KEY env var.
+# - VT_MODEL env var to override the default OpenAI model.
+#
+# Notes
+# -----
+# - This file follows the same style as other OES GenAI micro-apps for consistency.
+# - Defaults (50 frame step, ~50 words) match Marochelle’s “50 & 50” workflow.
+# ------------------------------------------------------------------------------
 
 import os
 import io
@@ -50,6 +67,7 @@ DEFAULT_FPS_FALLBACK = 30
 SUPPORTED_VIDEO_EXTS = ["mp4"]
 SUPPORTED_SRT_EXTS = ["srt"]
 MODEL_NAME = os.getenv("VT_MODEL", "gpt-4o")  # Allow override via .env
+MAX_VIDEO_BYTES = 200 * 1024 * 1024  # 200MB upload guidance
 
 
 # ------------------------------------------------------------------------------
@@ -82,21 +100,37 @@ def init_state() -> None:
     st.session_state.setdefault("video_path", None)
     st.session_state.setdefault("fps", DEFAULT_FPS_FALLBACK)
     st.session_state.setdefault("frame_count", 0)
-    st.session_state.setdefault("frame_step", 50)  # how many frames to jump each step
-    st.session_state.setdefault("frame_index", 0)
+    st.session_state.setdefault("frame_step", 50)  # navigation step (frames)
+    st.session_state.setdefault("frame_index", 0)  # index in step units
     st.session_state.setdefault("video_ready", False)
 
     # SRT + subtitles
     st.session_state.setdefault("subtitles", OrderedDict())
 
-    # Saved annotations (each item is a dict: image, frame_index, seconds, timestamp, subtitle, visual_text)
+    # Saved annotations – each entry:
+    # {
+    #   "frame_index": int,
+    #   "seconds": float,
+    #   "timestamp": str,
+    #   "subtitle": str,
+    #   "subtitle_start": float | None,
+    #   "image": PIL.Image,
+    #   "visual_text": str
+    # }
     st.session_state.setdefault("annotations", [])
 
     # GPT settings
-    st.session_state.setdefault("vt_word_limit", 80)
+    # Marochelle typically uses "50 & 50" (navigation + description).
+    st.session_state.setdefault("vt_word_limit", 50)
+
+    # Cropping mode flag
+    # True  → rectangle cropper UI in the main panel
+    # False → use full frame as-is ("freehand" / no crop box)
+    st.session_state.setdefault("use_rectangle_crop", True)
 
 
 init_state()
+
 
 # ------------------------------------------------------------------------------
 # Access control gate
@@ -119,7 +153,10 @@ if not st.session_state.authenticated:
 # Utility functions
 # ------------------------------------------------------------------------------
 def seconds_to_timestamp(seconds: float) -> str:
-    """Convert seconds float to HH:MM:SS.mmm formatted timestamp."""
+    """Convert seconds float to HH:MM:SS.mmm formatted timestamp (zero-padded).
+
+    This matches how timestamps appear in the combined visual + audio transcript.
+    """
     td = timedelta(seconds=int(seconds))
     ms = int((seconds - int(seconds)) * 1000)
     return f"{str(td)}.{ms:03d}"
@@ -128,9 +165,10 @@ def seconds_to_timestamp(seconds: float) -> str:
 def parse_srt_bytes(srt_bytes: bytes) -> OrderedDict:
     """Parse SRT file bytes into an OrderedDict of {start_seconds: caption}.
 
+    Design:
     - Handles multi-line captions.
-    - Normalizes commas to dots in timestamps.
-    - Ensures time-ordered output.
+    - Normalizes Windows newlines & comma-based timestamps.
+    - Returns entries sorted by start time (ascending).
     """
     text = srt_bytes.decode("utf-8", errors="ignore").replace("\r\n", "\n")
     blocks, block = [], []
@@ -170,6 +208,7 @@ def parse_srt_bytes(srt_bytes: bytes) -> OrderedDict:
                 m, s = parts
                 start_seconds = int(m) * 60 + float(s)
         except Exception:
+            # Skip malformed timestamps rather than breaking the entire parse
             continue
 
         caption = " ".join(t.strip() for t in text_lines if t.strip())
@@ -179,29 +218,8 @@ def parse_srt_bytes(srt_bytes: bytes) -> OrderedDict:
     return OrderedDict(parsed)
 
 
-def find_nearest_subtitle(seconds: float, subtitles: OrderedDict) -> str:
-    """Return the subtitle text whose start time is <= seconds and closest to it.
-
-    If no earlier subtitle exists, return 'No subtitle'.
-    """
-    if not subtitles:
-        return "No subtitle"
-
-    keys = list(subtitles.keys())
-    # find rightmost key <= seconds
-    candidate = None
-    for k in keys:
-        if k <= seconds:
-            candidate = k
-        else:
-            break
-    if candidate is None:
-        return "No subtitle"
-    return subtitles.get(candidate, "No subtitle")
-
-
 def pil_to_base64_jpg(pil_img: Image.Image) -> str:
-    """Convert PIL image to base64-encoded JPEG string for GPT-4o vision input."""
+    """Convert a PIL image to a base64-encoded JPEG string for GPT-4o Vision."""
     buf = io.BytesIO()
     pil_img.save(buf, format="JPEG", quality=95)
     return base64.b64encode(buf.getvalue()).decode("utf-8")
@@ -214,7 +232,12 @@ _openai_client = None
 
 
 def get_openai_client():
-    """Initialize and memoize OpenAI client using API key from environment."""
+    """Initialize and memoize OpenAI client using the environment API key.
+
+    Notes:
+    - Uses the official OpenAI Python SDK (v1-style client).
+    - MODEL_NAME can be overridden via VT_MODEL in the environment.
+    """
     global _openai_client
     if _openai_client is None:
         if not OPENAI_API_KEY:
@@ -232,16 +255,23 @@ def describe_image_with_gpt(
     word_limit: int,
     max_tokens: int = 300,
 ) -> str:
-    """Send an image to GPT-4o for description using vision API.
+    """Generate a visual description for a frame (or cropped region) via GPT-4o Vision.
 
-    Parameters:
-        pil_img:     The frame captured from the video (or cropped region).
-        base_prompt: Instructional prompt (accessibility-focused).
-        word_limit:  Soft word cap communicated to the model.
-        max_tokens:  Upper bound for token count.
+    Parameters
+    ----------
+    pil_img:
+        The image to be described (full frame or cropped selection).
+    base_prompt:
+        Instructional prompt that sets context and tone for the description.
+    word_limit:
+        Soft cap for description length; communicated to the model in natural language.
+    max_tokens:
+        Hard upper bound for the completion token count.
 
-    Returns:
-        String content of GPT response.
+    Returns
+    -------
+    str
+        Model-generated description text (stripped, never None).
     """
     base64_image = pil_to_base64_jpg(pil_img)
     client = get_openai_client()
@@ -273,15 +303,16 @@ def describe_image_with_gpt(
 
 
 # ------------------------------------------------------------------------------
-# UI: Main layout and functional flow
+# UI: Main layout and high-level flow
 # ------------------------------------------------------------------------------
 st.title(APP_TITLE)
 st.caption(
-    "Refactored with SRT-first workflow, frame stepping, in-app editing, and GPT-4o vision."
+    "Visual Transcripts Generator aligned to Coursera/Berkeley workflows – "
+    "SRT-first, frame stepping, in-app editing, and GPT-4o Vision assistance."
 )
 
 # ------------------------------------------------------------------------------
-# Global settings (frame step, word limit)
+# Global settings (frame step, word limit, cropping mode)
 # ------------------------------------------------------------------------------
 with st.sidebar.expander("⚙️ Settings", expanded=True):
     st.write("Tune how you navigate the video and how verbose GPT responses are.")
@@ -292,6 +323,10 @@ with st.sidebar.expander("⚙️ Settings", expanded=True):
         max_value=1000,
         value=int(st.session_state.frame_step),
         step=1,
+        help=(
+            "This controls how many frames the slider jumps at a time. "
+            "For example, if set to 50, each step advances 50 frames."
+        ),
     )
 
     st.session_state.vt_word_limit = st.slider(
@@ -300,6 +335,16 @@ with st.sidebar.expander("⚙️ Settings", expanded=True):
         max_value=200,
         value=int(st.session_state.vt_word_limit),
         step=10,
+    )
+
+    st.session_state.use_rectangle_crop = st.checkbox(
+        "Use rectangle crop mode (recommended)",
+        value=bool(st.session_state.get("use_rectangle_crop", True)),
+        help=(
+            "When enabled, you can drag a rectangle over the frame to focus on a region. "
+            "When disabled, the full frame is used (similar to the 'freehand' mode "
+            "described in the localhost VT walkthrough)."
+        ),
     )
 
 # ------------------------------------------------------------------------------
@@ -315,12 +360,28 @@ with col_u2:
         "📝 Upload Subtitle File (SRT – required)", type=SUPPORTED_SRT_EXTS
     )
 
+# File size guidance and validation
+if video_file is not None:
+    if getattr(video_file, "size", None) and video_file.size > MAX_VIDEO_BYTES:
+        st.error(
+            "This tool currently supports videos up to approximately 200 MB.\n\n"
+            "Please compress the video first (e.g. via LT tooling, Clipchamp / "
+            "Microsoft Editor, or another compressor) and then re-upload."
+        )
+        # Prevent further processing with this file in this run
+        video_file = None
+    else:
+        st.caption(
+            "Tip: For smoother performance and to match VT workflows, "
+            "compress videos to ≤ 200 MB before uploading."
+        )
+
 # Video preview and temporary storage
 if video_file is not None:
     with st.expander("▶️ Click to preview uploaded video"):
         st.video(video_file)
 
-    # Only rewrite temp file if this is a new upload (by name/size)
+    # Persist this upload to a temporary file
     temp_video_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
     with open(temp_video_path, "wb") as f:
         f.write(video_file.read())
@@ -331,14 +392,17 @@ if st.button("🚀 Process video + subtitles"):
     if video_file is None or srt_file is None:
         st.error("Please upload BOTH a video file and an SRT file before processing.")
     else:
+        # Parse subtitles
         st.session_state["subtitles"] = parse_srt_bytes(srt_file.read())
 
+        # Read basic video metadata
         cap = cv2.VideoCapture(st.session_state.video_path)
         fps = cap.get(cv2.CAP_PROP_FPS) or DEFAULT_FPS_FALLBACK
         st.session_state["fps"] = int(round(fps))
         st.session_state["frame_count"] = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         cap.release()
 
+        # Reset per-run state
         st.session_state["video_ready"] = True
         st.session_state["frame_index"] = 0
         st.session_state["annotations"] = []
@@ -371,11 +435,10 @@ if st.session_state.get("video_ready", False) and st.session_state.video_path:
 
     col_nav_1, col_nav_2 = st.columns([3, 1])
     with col_nav_1:
-        # Prevent invalid slider bounds
+        # "frame_index" is in units of 'steps', not raw frames
         safe_max = max(1, max_step_index)
-
         step_index = st.slider(
-            "Select frame position (stepping by configured frame step)",
+            "Select frame position (in steps of the configured frame step)",
             min_value=0,
             max_value=safe_max,
             value=min(st.session_state["frame_index"], safe_max),
@@ -400,21 +463,30 @@ if st.session_state.get("video_ready", False) and st.session_state.video_path:
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         current_pil_image = Image.fromarray(frame_rgb)
 
-        # Allow user to crop/select a region of the frame
-        st.markdown("### Select region to use for visual transcript")
+        # Crop behaviour depends on the "use_rectangle_crop" toggle.
+        if st.session_state.get("use_rectangle_crop", True):
+            # Rectangle crop mode (matches the localhost rectangle behaviour)
+            st.markdown("### Select region to use for visual transcript")
 
-        cropped_img = st_cropper(
-            current_pil_image,
-            realtime_update=True,
-            box_color="#FF0000",  # Red selection box
-            aspect_ratio=None,  # Allows free-form selection
-        )
+            cropped_img = st_cropper(
+                current_pil_image,
+                realtime_update=True,
+                box_color="#FF0000",  # Red selection box
+                aspect_ratio=None,  # Free-form rectangle
+            )
 
-        # Show the cropped output below the cropper
-        st.image(cropped_img, caption="Cropped Region", use_column_width=True)
+            st.image(cropped_img, caption="Cropped Region", use_column_width=True)
 
-        # Use cropped image instead of full frame
-        current_pil_image = cropped_img
+            # Use cropped image instead of full frame
+            current_pil_image = cropped_img
+        else:
+            # "Freehand"/full-frame mode – no rectangle UI, just use the frame as-is
+            st.markdown("### Using full frame (rectangle crop disabled)")
+            st.image(
+                current_pil_image,
+                caption="Full Frame (no rectangle crop)",
+                use_column_width=True,
+            )
 
         current_seconds = frame_number / max(st.session_state["fps"], 1)
         current_timestamp = seconds_to_timestamp(current_seconds)
@@ -423,7 +495,7 @@ if st.session_state.get("video_ready", False) and st.session_state.video_path:
     else:
         st.warning("Could not read this frame. Try a different position.")
 
-    # Navigation buttons
+    # Navigation + save controls
     nav_col1, nav_col2, nav_col3 = st.columns(3)
     with nav_col1:
         if st.button("⏮ Previous step"):
@@ -438,16 +510,30 @@ if st.session_state.get("video_ready", False) and st.session_state.video_path:
             fps = st.session_state.get("fps", DEFAULT_FPS_FALLBACK)
             seconds = frame_number / max(fps, 1.0)
             timestamp = seconds_to_timestamp(seconds)
-            subtitle_text = find_nearest_subtitle(
-                seconds, st.session_state["subtitles"]
-            )
+
+            subtitles = st.session_state["subtitles"]
+            subtitle_text = "No subtitle"
+            subtitle_start = None
+
+            if subtitles:
+                keys = list(subtitles.keys())
+                candidate = None
+                for k in keys:
+                    if k <= seconds:
+                        candidate = k
+                    else:
+                        break
+                if candidate is not None:
+                    subtitle_start = candidate
+                    subtitle_text = subtitles.get(candidate, "No subtitle")
 
             annotation = {
                 "frame_index": frame_number,
                 "seconds": seconds,
                 "timestamp": timestamp,
                 "subtitle": subtitle_text,
-                "image": current_pil_image,  # ← this now includes the cropped region
+                "subtitle_start": subtitle_start,
+                "image": current_pil_image,
                 "visual_text": "",
             }
 
@@ -459,25 +545,15 @@ if st.session_state.get("video_ready", False) and st.session_state.video_path:
 # ------------------------------------------------------------------------------
 # Sidebar: Saved frames + in-app editing + GPT vision assistance
 # ------------------------------------------------------------------------------
-# NOTE:
-#   - This panel is placed directly in st.sidebar (NO expanders around it),
-#     because sidebar expanders suppress vertical scrolling.
-#   - Each annotation block (image + text + GPT assist) is displayed in order.
-#   - All widgets receive stable session_state keys to avoid UI jitter.
-# ------------------------------------------------------------------------------
-
-with st.sidebar:  # Ensures proper scroll behavior
+with st.sidebar:
     st.subheader("🖼 Saved Frames & Visual Transcripts")
 
-    # If no frames have been saved yet, show guidance text.
     if not st.session_state["annotations"]:
         st.info(
             "Use the main panel to navigate the video and click 'Save this frame' "
             "to start building your visual transcript."
         )
-
     else:
-        # Base prompt for GPT-4o vision assistance
         base_prompt = (
             "You are helping create visual descriptions for a course's accessibility "
             "materials. Describe only the key visual elements and on-screen text that "
@@ -485,31 +561,28 @@ with st.sidebar:  # Ensures proper scroll behavior
             "descriptive tone suitable for screen readers."
         )
 
-        # Loop through all saved frame annotations
         for i, ann in enumerate(st.session_state["annotations"]):
             st.markdown("---")
 
-            # Display the saved frame image
+            # Frame preview
             st.image(
                 ann["image"],
                 caption=f"Frame {ann['frame_index']} @ {ann['timestamp']}",
                 use_column_width=True,
             )
 
-            # Show nearest SRT subtitle if applicable
+            # Nearest SRT subtitle
             if ann["subtitle"] and ann["subtitle"] != "No subtitle":
                 st.caption(f"**SRT**: {ann['subtitle']}")
             else:
                 st.caption("_No matching subtitle for this time._")
 
-            # KEY for the text area — keeps user edits persistent across reruns
+            # Stable key for this frame's visual text area
             text_key = f"vt_text_{i}"
 
-            # Bootstrap session_state for text area (only once)
             if text_key not in st.session_state:
                 st.session_state[text_key] = ann.get("visual_text", "")
 
-            # Editable visual transcript text area
             st.write("Visual transcript (editable):")
             st.text_area(
                 label="",
@@ -517,77 +590,94 @@ with st.sidebar:  # Ensures proper scroll behavior
                 height=120,
             )
 
-            # Sync text area → annotation object
+            # Keep annotation in sync with widget state
             ann["visual_text"] = st.session_state[text_key]
 
-            # Two-column row: GPT Assist + Remove
-            btn_cols = st.columns([1, 1])
+            # Per-frame actions: GPT Assist + Remove
+            btn_cols = st.columns(2)
 
-            # ------------------------------------------------------------------
-            # GPT-4o Vision Assistance for this frame
-            # ------------------------------------------------------------------
             with btn_cols[0]:
                 if st.button(f"✨ GPT assist #{i+1}", key=f"gpt_btn_{i}"):
                     try:
-                        with st.spinner("Calling GPT-4o vision…"):
+                        with st.spinner("Calling GPT-4o Vision…"):
                             response = describe_image_with_gpt(
                                 ann["image"],
                                 base_prompt=base_prompt,
                                 word_limit=int(st.session_state["vt_word_limit"]),
                             )
-                        # Update UI + annotation
                         st.session_state[text_key] = response
                         ann["visual_text"] = response
                         st.success("Updated from GPT-4o.")
                     except Exception as e:
                         st.error(f"Error calling GPT: {e}")
 
-            # ------------------------------------------------------------------
-            # Remove this saved frame + its text field
-            # ------------------------------------------------------------------
             with btn_cols[1]:
                 if st.button(f"🗑 Remove #{i+1}", key=f"del_btn_{i}"):
-                    # Remove annotation and its associated text area state
                     del st.session_state["annotations"][i]
                     if text_key in st.session_state:
                         del st.session_state[text_key]
-
                     st.warning(f"Removed frame #{i+1} from annotations.")
-                    st.rerun()  # Refresh sidebar immediately to reflect change
+                    st.rerun()
 
 
 # ------------------------------------------------------------------------------
-# Export transcript to .docx
+# Export: combined audio + visual transcript (.docx)
 # ------------------------------------------------------------------------------
-def build_docx_from_annotations(annotations: list) -> str:
-    """Generate a .docx transcript preserving time order.
+def build_docx_from_annotations(
+    annotations: list,
+    subtitles: OrderedDict,
+) -> str:
+    """Generate a combined audio + visual .docx transcript.
 
-    For each saved frame, we include:
-    - Timestamp
-    - (Optional) SRT subtitle
-    - Visual transcript text
+    Structure:
+    ----------
+    - Title and brief explanation line.
+    - Full SRT timeline (all captions in order).
+    - For any caption with one or more saved frames, insert the visual transcript(s)
+      directly after that caption.
+
+    This matches the workflow where:
+    - Captions/SRT are already QC'ed upstream.
+    - LD only needs to QC and lightly edit the visual descriptions.
     """
-    # Sort by time just in case user saved out-of-order
-    sorted_anns = sorted(annotations, key=lambda a: a["seconds"])
-
     doc = Document()
-    doc.add_heading("Visual Transcript", level=1)
+    doc.add_heading("Combined Visual and Audio Transcript", level=1)
+    doc.add_paragraph("Timestamps are shown in hours, minutes, and seconds format.")
 
-    if not sorted_anns:
-        doc.add_paragraph("No visual annotations were captured.")
-    else:
-        for ann in sorted_anns:
-            ts = ann["timestamp"]
-            subtitle = ann.get("subtitle") or ""
-            visual = ann.get("visual_text") or ""
+    if not subtitles:
+        doc.add_paragraph("No SRT subtitles were loaded.")
+        out_path = tempfile.NamedTemporaryFile(delete=False, suffix=".docx").name
+        doc.save(out_path)
+        return out_path
 
-            p = doc.add_paragraph()
-            p.add_run(f"[{ts}]").bold = True
-            if subtitle:
-                doc.add_paragraph(f"SRT: {subtitle}")
-            if visual:
-                doc.add_paragraph(f"Visual: {visual}")
-            doc.add_paragraph("")  # spacer
+    # Group visual annotations by associated subtitle start time
+    visuals_by_start = {}
+    for ann in annotations:
+        key = ann.get("subtitle_start")
+        if key is None:
+            continue
+        visuals_by_start.setdefault(key, []).append(ann)
+
+    # Walk through SRT in time order and insert visuals where present
+    for start_sec, caption in subtitles.items():
+        ts = seconds_to_timestamp(start_sec)
+
+        # Audio caption line
+        p = doc.add_paragraph()
+        p.add_run(f"[{ts}] ").bold = True
+        p.add_run(caption)
+
+        # Any visual transcripts aligned to this caption
+        if start_sec in visuals_by_start:
+            # Sort visuals by the exact second of the captured frame
+            for ann in sorted(visuals_by_start[start_sec], key=lambda a: a["seconds"]):
+                visual_text = (ann.get("visual_text") or "").strip()
+                if not visual_text:
+                    continue
+
+                vp = doc.add_paragraph()
+                vp.add_run("Visual: ").bold = True
+                vp.add_run(visual_text)
 
     out_path = tempfile.NamedTemporaryFile(delete=False, suffix=".docx").name
     doc.save(out_path)
@@ -596,17 +686,20 @@ def build_docx_from_annotations(annotations: list) -> str:
 
 st.sidebar.subheader("📥 Download")
 if st.sidebar.button("Generate .docx transcript"):
-    if not st.session_state["annotations"]:
-        st.sidebar.info("Nothing to export yet – save at least one frame first.")
-    else:
-        path = build_docx_from_annotations(st.session_state["annotations"])
-        with open(path, "rb") as fh:
-            st.sidebar.download_button(
-                "Download Visual Transcript (.docx)",
-                data=fh,
-                file_name="visual_transcript.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )
+    path = build_docx_from_annotations(
+        st.session_state["annotations"],
+        st.session_state["subtitles"],
+    )
+    with open(path, "rb") as fh:
+        st.sidebar.download_button(
+            "Download combined visual + audio transcript (.docx)",
+            data=fh,
+            file_name="combined_visual_audio_transcript.docx",
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+        )
 
 # ------------------------------------------------------------------------------
 # Logout control
