@@ -361,26 +361,34 @@ else:
 # ------------------------------------------------------------------------------
 if st.session_state.video_ready and st.session_state.video_path:
 
-    total = st.session_state.frame_count
+    # Retrieve video metadata
+    total_frames = st.session_state.frame_count
     step = max(1, int(st.session_state.frame_step))
-    max_idx = max(0, (total - 1) // step)
 
     st.markdown("### 🎞 Frame Navigation")
-    c1, c2 = st.columns([3, 1])
 
+    # --- SAFETY PATCH (prevent Streamlit slider crash) ---
+    if total_frames <= 1:
+        # Ensures min_value < max_value even when video is extremely short
+        safe_max = 1
+    else:
+        safe_max = max(1, (total_frames - 1) // step)
+    # ------------------------------------------------------
+
+    c1, c2 = st.columns([3, 1])
     with c1:
         idx = st.slider(
             "Frame index (in step units)",
             min_value=0,
-            max_value=max_idx,
-            value=st.session_state.frame_index,
+            max_value=safe_max,
+            value=min(st.session_state.frame_index, safe_max),
         )
     with c2:
-        st.write(f"Total frames: `{total}`")
+        st.write(f"Total frames: `{total_frames}`")
         st.write(f"Step: `{step}`")
 
     st.session_state.frame_index = idx
-    frame_num = min(idx * step, total - 1)
+    frame_num = min(idx * step, total_frames - 1)
 
     cap = cv2.VideoCapture(st.session_state.video_path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
@@ -415,13 +423,15 @@ if st.session_state.video_ready and st.session_state.video_path:
         # NAV BUTTONS
         # ---------------------------------
         nc1, nc2, nc3 = st.columns(3)
+
         with nc1:
             if st.button("⏮ Previous"):
                 st.session_state.frame_index = max(0, idx - 1)
                 st.rerun()
+
         with nc2:
             if st.button("⏭ Next"):
-                st.session_state.frame_index = min(max_idx, idx + 1)
+                st.session_state.frame_index = min(safe_max, idx + 1)
                 st.rerun()
 
         # ---------------------------------
