@@ -2,7 +2,7 @@
 # Visual Transcripts Generator (v2.2) – Final Refactored + Patched Build
 # ------------------------------------------------------------------------------
 # Refactor date: 2025-12-09
-# Refactored by: Imaad Fakier (OES) + ChatGPT
+# Refactored by: Imaad Fakier (OES)
 #
 # Summary of v2.2 improvements:
 # - FIXED: Streamlit Cloud injecting unsupported HTTP proxy → GPT errors solved.
